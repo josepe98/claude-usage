@@ -296,6 +296,65 @@ class TestHTMLTemplate(unittest.TestCase):
         self.assertIn("range === '30d' ? 30", get_bounds)
         self.assertIn(": 90", get_bounds)
 
+    def test_read_url_models_falls_back_to_all_when_no_billable(self):
+        """Regression GH#106/GH#76: if no model names contain opus/sonnet/haiku,
+        readURLModels must select ALL models, not return an empty set that
+        causes the dashboard to show 0 data for every range including 'All'."""
+        read_url_models = self._extract_js_function("readURLModels")
+        self.assertIn("billable.length", read_url_models)
+        self.assertIn("allModels", read_url_models)
+
+
+class TestEmptyStringModel(unittest.TestCase):
+    """Regression GH#106: turns with model='' must be mapped to 'unknown', not ''."""
+
+    def setUp(self):
+        self.tmpfile = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.tmpfile.close()
+        self.db_path = Path(self.tmpfile.name)
+        conn = get_db(self.db_path)
+        init_db(conn)
+        sessions = [{
+            "session_id": "sess-nomodel", "project_name": "user/proj",
+            "first_timestamp": "2026-03-12T10:00:00Z",
+            "last_timestamp": "2026-03-12T11:00:00Z",
+            "git_branch": "main", "model": None,
+            "total_input_tokens": 1000, "total_output_tokens": 500,
+            "total_cache_read": 0, "total_cache_creation": 0,
+            "turn_count": 5,
+        }]
+        upsert_sessions(conn, sessions)
+        turns = [{
+            "session_id": "sess-nomodel", "timestamp": "2026-03-12T10:30:00Z",
+            "model": "",
+            "input_tokens": 1000, "output_tokens": 500,
+            "cache_read_tokens": 0, "cache_creation_tokens": 0,
+            "tool_name": None, "cwd": "/tmp", "message_id": "",
+        }]
+        insert_turns(conn, turns)
+        conn.commit()
+        conn.close()
+
+    def tearDown(self):
+        os.unlink(self.db_path)
+
+    def test_empty_model_mapped_to_unknown_in_all_models(self):
+        data = get_dashboard_data(db_path=self.db_path)
+        self.assertIn("unknown", data["all_models"])
+        self.assertNotIn("", data["all_models"])
+
+    def test_empty_model_mapped_to_unknown_in_daily(self):
+        data = get_dashboard_data(db_path=self.db_path)
+        models_in_daily = {r["model"] for r in data["daily_by_model"]}
+        self.assertIn("unknown", models_in_daily)
+        self.assertNotIn("", models_in_daily)
+
+    def test_empty_model_mapped_to_unknown_in_hourly(self):
+        data = get_dashboard_data(db_path=self.db_path)
+        models_in_hourly = {r["model"] for r in data["hourly_by_model"]}
+        self.assertIn("unknown", models_in_hourly)
+        self.assertNotIn("", models_in_hourly)
+
 
 class TestPricingParity(unittest.TestCase):
     """Verify CLI and dashboard pricing tables stay in sync."""
