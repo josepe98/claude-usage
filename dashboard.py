@@ -763,12 +763,80 @@ init();
 </html>
 """
 
+# ── PWA assets ─────────────────────────────────────────────────────────────────
+# Bar-chart glyph in the Apple-theme accent blue. Used as the manifest icon and
+# as both <link rel="icon"> and apple-touch-icon. SVG is fine for PWA installs
+# in modern Chrome/Edge/Safari — no separate PNG raster is needed.
+APP_ICON_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="96" fill="#0071e3"/>
+  <rect x="112" y="288" width="64" height="128" rx="12" fill="#ffffff"/>
+  <rect x="208" y="208" width="64" height="208" rx="12" fill="#ffffff"/>
+  <rect x="304" y="144" width="64" height="272" rx="12" fill="#ffffff"/>
+  <rect x="96"  y="416" width="320" height="16" rx="8" fill="rgba(255,255,255,0.7)"/>
+</svg>"""
+
+# Minimal service worker. The only "smart" behavior is a stale-while-revalidate
+# cache for the Chart.js CDN bundle so a flaky network doesn't break dashboard
+# boot. All other requests (including /api/*) go straight to the network.
+SERVICE_WORKER_JS = """// Claude Code Usage Dashboard — minimal PWA service worker.
+const CACHE_NAME = "claude-usage-static-v1";
+const STATIC_URLS = [
+  "https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js",
+];
+
+self.addEventListener("install", (event) => {
+  event.waitUntil(
+    caches.open(CACHE_NAME).then((cache) => cache.addAll(STATIC_URLS).catch(() => {}))
+  );
+  self.skipWaiting();
+});
+
+self.addEventListener("activate", (event) => {
+  event.waitUntil(
+    caches.keys().then((keys) =>
+      Promise.all(keys.filter((k) => k !== CACHE_NAME).map((k) => caches.delete(k)))
+    ).then(() => self.clients.claim())
+  );
+});
+
+self.addEventListener("fetch", (event) => {
+  const req = event.request;
+  if (req.method !== "GET") return;
+  const url = new URL(req.url);
+
+  // Stale-while-revalidate for the Chart.js CDN bundle.
+  if (STATIC_URLS.includes(url.href)) {
+    event.respondWith(
+      caches.open(CACHE_NAME).then(async (cache) => {
+        const cached = await cache.match(req);
+        const network = fetch(req).then((res) => {
+          if (res && res.status === 200) cache.put(req, res.clone());
+          return res;
+        }).catch(() => cached);
+        return cached || network;
+      })
+    );
+    return;
+  }
+
+  // Everything else: plain network passthrough.
+  event.respondWith(fetch(req).catch(() => caches.match(req)));
+});
+"""
+
+
 HTML_TEMPLATE = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Claude Code Usage Dashboard</title>
+<link rel="manifest" href="/manifest.json">
+<meta name="theme-color" content="#0071e3">
+<link rel="icon" type="image/svg+xml" href="/icon.svg">
+<link rel="apple-touch-icon" href="/icon.svg">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Claude Usage">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js" integrity="sha384-e6nUZLBkQ86NJ6TVVKAeSaK8jWa3NhkYWZFomE39AvDbQWeie9PlQqM3pmYW5d1g" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 <style id="active-theme">:root {
     --bg: #f5f5f7; --card: #ffffff; --border: rgba(0,0,0,0.08);
@@ -2367,6 +2435,15 @@ function scheduleAutoRefresh() {
 
 loadData(); _populateThemeDropdown();
 scheduleAutoRefresh();
+
+// Register service worker so the dashboard is PWA-installable. Guard with
+// feature-detect for older browsers (and for file:// previews where SW APIs
+// are unavailable). Failures are swallowed — the dashboard works without it.
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", function () {
+    navigator.serviceWorker.register("/sw.js", { scope: "/" }).catch(function () {});
+  });
+}
 </script>
 </body>
 </html>
@@ -2461,6 +2538,52 @@ class DashboardHandler(BaseHTTPRequestHandler):
             body = html.encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(body)
+
+        elif path == "/manifest.json":
+            # PWA manifest — lets Chrome offer "Install Claude Usage" as an app.
+            manifest = {
+                "name": "Claude Code Usage Dashboard",
+                "short_name": "Claude Usage",
+                "description": "Local dashboard for tracking Claude Code token usage and cost.",
+                "start_url": "/",
+                "scope": "/",
+                "display": "standalone",
+                "orientation": "any",
+                "theme_color": "#0071e3",
+                "background_color": "#f5f5f7",
+                "icons": [
+                    {"src": "/icon.svg", "sizes": "192x192", "type": "image/svg+xml", "purpose": "any"},
+                    {"src": "/icon.svg", "sizes": "512x512", "type": "image/svg+xml", "purpose": "any"},
+                    {"src": "/icon.svg", "sizes": "any",     "type": "image/svg+xml", "purpose": "any maskable"},
+                ],
+            }
+            body = json.dumps(manifest).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/manifest+json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        elif path == "/sw.js":
+            # Minimal service worker — install, claim clients, and pass fetches
+            # through with a small cache for the Chart.js CDN bundle so repeat
+            # loads are instant and the dashboard still boots when offline.
+            body = SERVICE_WORKER_JS.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/javascript; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Service-Worker-Allowed", "/")
+            self.end_headers()
+            self.wfile.write(body)
+
+        elif path == "/icon.svg":
+            body = APP_ICON_SVG.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "image/svg+xml")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "public, max-age=86400")
             self.end_headers()
             self.wfile.write(body)
 
