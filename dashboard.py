@@ -15,6 +15,83 @@ from datetime import datetime
 DB_PATH    = Path.home() / ".claude" / "usage.db"
 THEMES_DIR = Path.home() / ".claude" / "claude-usage" / "themes"
 
+# Inbound webhook log + config. Module-level so tests can monkey-patch
+# these paths to point at a tempdir without writing to the user's home.
+INBOUND_LOG    = Path.home() / ".claude" / "inbound.jsonl"
+INBOUND_CONFIG = Path.home() / ".claude" / "inbound-config.json"
+INBOUND_MAX_BYTES = 10 * 1024 * 1024  # rotate at 10 MB
+
+
+def _load_inbound_secret():
+    """Read the optional shared-secret from ~/.claude/inbound-config.json.
+    Returns None if the file is missing, malformed, or has no 'secret' key —
+    in which case the endpoint accepts unauthenticated POSTs."""
+    try:
+        with open(INBOUND_CONFIG, "r") as f:
+            cfg = json.load(f)
+        secret = cfg.get("secret")
+        return secret if isinstance(secret, str) and secret else None
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+
+
+def _rotate_inbound_log():
+    """If the active log is >= INBOUND_MAX_BYTES, move it to .jsonl.1 and
+    drop the previous .jsonl.1 (single-generation rotation)."""
+    try:
+        if not INBOUND_LOG.exists():
+            return
+        if INBOUND_LOG.stat().st_size < INBOUND_MAX_BYTES:
+            return
+        rotated = INBOUND_LOG.with_suffix(INBOUND_LOG.suffix + ".1")
+        if rotated.exists():
+            rotated.unlink()
+        INBOUND_LOG.rename(rotated)
+    except OSError:
+        # Rotation is best-effort; never block an append on a stat failure.
+        pass
+
+
+def append_inbound_event(event_type, payload, source_ip):
+    """Wrap an inbound payload with envelope metadata and append it as a
+    single JSONL line. Rotates the log first if it has hit the cap."""
+    _rotate_inbound_log()
+    INBOUND_LOG.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "type":        event_type,
+        "received_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "source_ip":   source_ip,
+        "payload":     payload,
+    }
+    with open(INBOUND_LOG, "a") as f:
+        f.write(json.dumps(record) + "\n")
+    return record
+
+
+def read_inbound_events(limit=100):
+    """Return up to `limit` most recent events (newest first). Skips lines
+    that fail to parse so a single bad write doesn't poison the endpoint."""
+    if not INBOUND_LOG.exists():
+        return []
+    try:
+        with open(INBOUND_LOG, "r") as f:
+            lines = f.readlines()
+    except OSError:
+        return []
+    out = []
+    for line in reversed(lines):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+        if len(out) >= limit:
+            break
+    return out
+
+
 # ── Bundled themes ─────────────────────────────────────────────────────────────
 BUNDLED_THEMES = [
     {
@@ -818,6 +895,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <div class="container">
   <div class="stats-row" id="stats-row"></div>
     <div id="pareto-card" style="display:none; margin: -8px 0 16px 0; padding: 10px 14px; background: rgba(217,119,87,0.08); border-radius: 8px; font-size: 12px; color: var(--text);"></div>
+    <details id="inbound-card" style="display:none; margin: -8px 0 16px 0; padding: 10px 14px; background: rgba(94,106,210,0.08); border-radius: 8px; font-size: 12px; color: var(--text);"><summary style="cursor:pointer; user-select:none;"><strong>Recent inbound events</strong> <span id="inbound-count" style="color:var(--muted);"></span></summary><div id="inbound-list" style="margin-top:8px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; line-height: 1.6;"></div></details>
   <div class="charts-grid">
     <div class="chart-card wide">
       <h2 id="daily-chart-title">Daily Token Usage</h2>
@@ -1420,6 +1498,7 @@ function applyFilter() {
   renderModelChart(byModel);
   renderProjectChart(byProject);
   renderPareto(lastFilteredSessions || filteredSessions);
+  renderInbound();
   lastFilteredSessions = sortSessions(filteredSessions);
   lastByProject = sortProjects(byProject);
   lastByProjectBranch = sortProjectBranch(byProjectBranch);
@@ -1737,6 +1816,34 @@ function renderPareto(filteredSessions) {  // eslint-disable-line no-unused-vars
   el.style.display = "";
   const names = ranked.map(s => `${s.project} (${s.session_id})`).join(", ");
   el.innerHTML = `<strong>Cost concentration:</strong> top 5 sessions account for <strong>${pct}%</strong> of spend in the current range. <span style="color:var(--muted)">(${names})</span>`;
+}
+
+async function renderInbound() {  // eslint-disable-line no-unused-vars
+  const card = document.getElementById("inbound-card");
+  if (!card) return;
+  try {
+    const resp = await fetch("/api/inbound?limit=10");
+    if (!resp.ok) { card.style.display = "none"; return; }
+    const d = await resp.json();
+    const events = (d && d.events) || [];
+    if (!events.length) { card.style.display = "none"; return; }
+    card.style.display = "";
+    document.getElementById("inbound-count").textContent =
+      "· last " + events.length + " event" + (events.length === 1 ? "" : "s");
+    document.getElementById("inbound-list").innerHTML = events.map(ev => {
+      const when = esc(ev.received_at || "");
+      const type = esc(ev.type || "(unknown)");
+      const ip = esc(ev.source_ip || "");
+      const payload = esc(JSON.stringify(ev.payload || {}));
+      return `<div style="padding:4px 0; border-top:1px solid var(--border);">
+        <span style="color:var(--accent);">${type}</span>
+        <span style="color:var(--muted);"> @ ${when} from ${ip}</span>
+        <div style="color:var(--muted); white-space:pre-wrap; word-break:break-all;">${payload}</div>
+      </div>`;
+    }).join("");
+  } catch (e) {
+    card.style.display = "none";
+  }
 }
 
 function renderProjectChart(byProject) {
@@ -2143,6 +2250,21 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
 
+        elif path == "/api/inbound":
+            parsed_url = urlparse(self.path)
+            try:
+                limit = int(parse_qs(parsed_url.query).get("limit", ["100"])[0])
+            except ValueError:
+                limit = 100
+            limit = max(1, min(limit, 1000))
+            events = read_inbound_events(limit=limit)
+            body = json.dumps({"events": events, "count": len(events)}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         elif self.path == "/themes":
             catalog_json = json.dumps(AWESOME_CATALOG)
             html = GALLERY_TEMPLATE.replace("__CATALOG_JSON__", catalog_json)
@@ -2181,6 +2303,65 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+        elif path.startswith("/api/inbound/"):
+            # Inbound webhook receiver: any caller can POST arbitrary JSON
+            # to /api/inbound/<event_type>. We wrap it with envelope
+            # metadata and append to ~/.claude/inbound.jsonl.
+            event_type = path[len("/api/inbound/"):].strip("/")
+            if not event_type or "/" in event_type:
+                self.send_response(404)
+                self.end_headers()
+                return
+
+            # Optional shared-secret check. If the operator configured a
+            # secret, the request MUST present it via X-Inbound-Secret.
+            expected = _load_inbound_secret()
+            if expected is not None:
+                provided = self.headers.get("X-Inbound-Secret", "")
+                if provided != expected:
+                    body = json.dumps({"error": "forbidden"}).encode("utf-8")
+                    self.send_response(403)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                length = 0
+            raw = self.rfile.read(length) if length > 0 else b""
+            try:
+                payload = json.loads(raw.decode("utf-8")) if raw else {}
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                body = json.dumps({"error": "invalid JSON body"}).encode("utf-8")
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+
+            source_ip = self.client_address[0] if self.client_address else ""
+            try:
+                record = append_inbound_event(event_type, payload, source_ip)
+            except OSError as e:
+                body = json.dumps({"error": f"write failed: {e}"}).encode("utf-8")
+                self.send_response(500)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+
+            body = json.dumps({"ok": True, "received_at": record["received_at"]}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         else:
             self.send_response(404)
             self.end_headers()
