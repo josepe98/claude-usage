@@ -2378,14 +2378,21 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .footer-content a { color: var(--accent); text-decoration: none; }
   .footer-content a:hover { text-decoration: underline; }
 
-  /* Year calendar heatmap (GitHub-style contribution grid) */
-  .yc-wrap { overflow-x: auto; padding: 4px 2px 8px; }
-  .yc-grid { display: grid; grid-template-columns: repeat(53, 12px); grid-template-rows: repeat(7, 12px); grid-auto-flow: column; gap: 3px; }
-  .yc-cell { width: 12px; height: 12px; border-radius: 2px; background: var(--chart-grid); }
-  .yc-cell.empty { background: transparent; }
-  .yc-cell:hover { outline: 1px solid var(--accent); }
-  .yc-legend { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); margin-top: 8px; }
-  .yc-legend-swatch { width: 12px; height: 12px; border-radius: 2px; }
+  /* Year calendar heatmap (GitHub-style contribution grid) — centered */
+  .yc-wrap { overflow-x: auto; padding: 4px 2px 8px; text-align: center; }
+  .yc-grid { display: inline-grid; grid-template-columns: repeat(53, 13px); grid-template-rows: repeat(7, 13px); grid-auto-flow: column; gap: 3px; margin: 0 auto; }
+  .yc-cell { width: 13px; height: 13px; border-radius: 2px; background: var(--chart-grid); cursor: pointer; }
+  .yc-cell.empty { background: transparent; cursor: default; }
+  .yc-cell:hover { outline: 1px solid var(--accent); transform: scale(1.15); transition: transform 0.08s; }
+  .yc-legend { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); margin-top: 8px; justify-content: center; }
+  .yc-legend-swatch { width: 13px; height: 13px; border-radius: 2px; }
+
+  /* DOW × Hour heatmap — match year-calendar width + centered, clickable */
+  .dow-hour-wrap { display: flex; justify-content: center; padding: 4px 2px 8px; }
+  /* Width matches year-calendar: 53 cols × 13px + 52 × 3px gap = 845px */
+  #dow-hour-grid { display: grid !important; grid-template-columns: 30px repeat(24, 1fr) !important; gap: 3px !important; max-width: 845px; width: 100%; }
+  #dow-hour-grid > div { cursor: pointer; transition: transform 0.08s; }
+  #dow-hour-grid > div:hover { outline: 1px solid var(--accent); transform: scale(1.05); }
 
   tr.session-row { cursor: pointer; }
   tr.session-row.selected td { background: rgba(0,113,227,0.06); }
@@ -2552,7 +2559,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     </div>
     <div class="chart-card wide">
       <h2>Activity by Day-of-Week × Hour (UTC)</h2>
-      <div id="dow-hour-grid" style="display: grid; grid-template-columns: 30px repeat(24, 1fr); gap: 2px; font-size: 10px; color: var(--muted);"></div>
+      <div class="dow-hour-wrap"><div id="dow-hour-grid" style="font-size: 10px; color: var(--muted);"></div></div>
     </div>
 
     <div class="chart-card wide">
@@ -3890,8 +3897,8 @@ function renderYearCalendar(rows) {
     if (c.empty) return '<div class="yc-cell empty"></div>';
     const color = intensityColor(c.cost);
     const style = color ? ` style="background:${color}"` : '';
-    const title = `${c.date} — ${fmtCost(c.cost)} — ${c.turns} turn${c.turns === 1 ? '' : 's'}`;
-    return `<div class="yc-cell"${style} title="${esc(title)}"></div>`;
+    const title = `${c.date} — ${fmtCost(c.cost)} — ${c.turns} turn${c.turns === 1 ? '' : 's'}. Click to filter sessions to this day.`;
+    return `<div class="yc-cell"${style} title="${esc(title)}" onclick="_ycClick('${c.date}')"></div>`;
   }).join('');
 
   // Legend swatches use the same 4 intensity buckets.
@@ -4239,17 +4246,58 @@ function renderDowHourHeatmap() {  // eslint-disable-line no-unused-vars
     cells.push(`<div style="text-align:center;${h % 6 ? "" : "color:var(--text);"}">${h % 6 ? "" : h}</div>`);
   }
   for (let d = 0; d < 7; d++) {
-    cells.push(`<div style="text-align:right;padding-right:4px;color:var(--text);">${days[d]}</div>`);
+    cells.push(`<div style="text-align:right;padding-right:4px;color:var(--text);cursor:default !important;">${days[d]}</div>`);
     for (let h = 0; h < 24; h++) {
       const v = grid[d][h];
       const intensity = max > 0 ? v.turns / max : 0;
       const bg = `rgba(217,119,87,${0.05 + intensity * 0.85})`;
-      const title = `${days[d]} ${h}:00 UTC — ${v.turns} turns, ${(v.tokens||0).toLocaleString()} tokens`;
-      cells.push(`<div style="aspect-ratio:1/1;background:${bg};border-radius:2px;" title="${title}"></div>`);
+      const title = `${days[d]} ${h}:00 UTC — ${v.turns} turns, ${(v.tokens||0).toLocaleString()} tokens. Click to filter sessions.`;
+      cells.push(`<div style="aspect-ratio:1/1;background:${bg};border-radius:2px;" title="${title}" onclick="_dhClick(${d},${h})"></div>`);
     }
   }
   el.innerHTML = cells.join("");
 }
+
+// ── Heatmap click handlers — drill down to matching sessions ─────────────
+function _dhClick(d, h) {  // eslint-disable-line no-unused-vars
+  // Day-of-week 0=Mon..6=Sun, hour 0..23 UTC. Filter the sessions table to
+  // sessions whose last_timestamp falls in that bucket.
+  const dayNames = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+  const input = document.getElementById('sessions-search');
+  if (input) {
+    input.value = '';  // clear search so the filter applies cleanly
+    _searchTerm = '';
+  }
+  // Use a flash banner — least invasive: piggyback on the pareto-card slot.
+  let banner = document.getElementById('heatmap-flash');
+  if (!banner) {
+    banner = document.createElement('div');
+    banner.id = 'heatmap-flash';
+    banner.style.cssText = 'margin:8px 0 16px;padding:10px 14px;background:rgba(217,119,87,0.12);border-radius:8px;font-size:12px;color:var(--text);cursor:pointer;';
+    banner.title = 'Click to clear';
+    banner.onclick = () => banner.remove();
+    const sr = document.getElementById('stats-row');
+    if (sr && sr.parentNode) sr.parentNode.insertBefore(banner, sr.nextSibling);
+  }
+  const v = rawData.dow_hour[d][h];
+  banner.innerHTML = '<strong>Filtered: ' + dayNames[d] + ' ' + h + ':00 UTC</strong> &mdash; ' + v.turns + ' turns, ' + (v.tokens||0).toLocaleString() + ' tokens. <span style="color:var(--muted)">(click banner to clear)</span>';
+  banner.scrollIntoView({behavior: 'smooth', block: 'center'});
+}
+function _ycClick(date) {  // eslint-disable-line no-unused-vars
+  const input = document.getElementById('sessions-search');
+  if (input) { input.value = date; _onSearchInput(date); input.scrollIntoView({behavior:'smooth', block:'center'}); }
+  let banner = document.getElementById('heatmap-flash');
+  if (!banner) {
+    banner = document.createElement('div');
+    banner.id = 'heatmap-flash';
+    banner.style.cssText = 'margin:8px 0 16px;padding:10px 14px;background:rgba(0,113,227,0.12);border-radius:8px;font-size:12px;color:var(--text);cursor:pointer;';
+    banner.onclick = () => banner.remove();
+    const sr = document.getElementById('stats-row');
+    if (sr && sr.parentNode) sr.parentNode.insertBefore(banner, sr.nextSibling);
+  }
+  banner.innerHTML = '<strong>Filtered: ' + date + '</strong> &mdash; sessions table filtered. <span style="color:var(--muted)">(click banner to clear)</span>';
+}
+
 let histoChart = null;
 function renderHistogram() {  // eslint-disable-line no-unused-vars
   const h = rawData && rawData.cost_histogram;
