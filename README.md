@@ -133,6 +133,71 @@ Costs are calculated using **Anthropic API pricing as of April 2026** ([claude.c
 
 ---
 
+## Team mode (workspace)
+
+By default the dashboard is single-machine -- each laptop scans its own
+`~/.claude/projects/` and writes to its own `~/.claude/usage.db`. Add a
+`~/.claude/workspace.json` to point multiple machines at one shared database
+for team-level rollups (cost by engineer, total spend, etc.).
+
+**Option A: shared SQLite file (zero setup)**
+
+```json
+{
+  "backend": "sqlite",
+  "machine_id": "jakduch-mbp",
+  "team": "engineering",
+  "db_path": "/Volumes/Dropbox/team/claude-usage.db"
+}
+```
+
+Works with Dropbox / NFS / SMB / iCloud Drive. No daemon, no server. Caveat:
+SQLite write locking is best-effort over network filesystems -- fine for a
+small team, but pick Postgres if you have heavy concurrent scans.
+
+**Option B: Postgres (recommended for >3 people)**
+
+```json
+{
+  "backend": "postgres",
+  "machine_id": "jakduch-mbp",
+  "team": "engineering"
+}
+```
+
+Set the DSN as an env var so it isn't committed anywhere:
+
+```sh
+export CLAUDE_USAGE_PG="postgresql://user:pass@host:5432/claude_usage"
+pip install psycopg2-binary
+python3 cli.py scan
+```
+
+`psycopg2-binary` is an optional dep -- only required when `backend = "postgres"`.
+
+**What you get**
+
+- `machine_id` column on `turns` + `sessions` (idempotent migration -- safe to
+  upgrade an existing single-machine DB)
+- `/api/data` payload gains a `by_machine` aggregation and `all_machines` list
+- Dashboard adds a **Machine** filter dropdown (auto-hidden if only one
+  machine has reported in -- existing single-laptop users see no UI change)
+
+**Backward compatibility**: if `~/.claude/workspace.json` doesn't exist,
+behavior is unchanged -- local SQLite at `~/.claude/usage.db`, no team
+plumbing engaged. Existing databases are migrated in place on first scan.
+
+**Env-var overrides** (handy for CI / Docker):
+
+| Variable | Purpose |
+|---|---|
+| `CLAUDE_USAGE_BACKEND` | `sqlite` or `postgres` |
+| `CLAUDE_USAGE_PG` | Postgres DSN |
+| `CLAUDE_USAGE_MACHINE_ID` | Override the machine label |
+| `CLAUDE_USAGE_TEAM` | Team label |
+
+---
+
 ## Cowork sessions
 
 Claude Desktop (the agent / Cowork mode in the desktop app) writes a per-session
@@ -158,3 +223,4 @@ the API reports rather than aggregating per-event streaming chunks.
 | `scanner.py` | Parses JSONL transcripts, writes to `~/.claude/usage.db` |
 | `dashboard.py` | HTTP server + single-page HTML/JS dashboard |
 | `cli.py` | `scan`, `today`, `stats`, `dashboard`, `theme` commands |
+| `workspace.py` | Team-mode config: backend selection, machine_id, lazy psycopg2 import |
