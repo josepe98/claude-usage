@@ -1397,8 +1397,8 @@ function renderPareto(filteredSessions) {  // eslint-disable-line no-unused-vars
   const top = ranked.reduce((a, s) => a + s.cost, 0);
   const pct = (top / total * 100).toFixed(0);
   el.style.display = "";
-  const names = ranked.map(s => \`\${s.project} (\${s.session_id})\`).join(", ");
-  el.innerHTML = \`<strong>Cost concentration:</strong> top 5 sessions account for <strong>\${pct}%</strong> of spend in the current range. <span style="color:var(--muted)">(\${names})</span>\`;
+  const names = ranked.map(s => `${s.project} (${s.session_id})`).join(", ");
+  el.innerHTML = `<strong>Cost concentration:</strong> top 5 sessions account for <strong>${pct}%</strong> of spend in the current range. <span style="color:var(--muted)">(${names})</span>`;
 }
 
 function renderProjectChart(byProject) {
