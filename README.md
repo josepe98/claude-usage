@@ -198,3 +198,65 @@ the API reports rather than aggregating per-event streaming chunks.
 | `scanner.py` | Parses JSONL transcripts, writes to `~/.claude/usage.db` |
 | `dashboard.py` | HTTP server + single-page HTML/JS dashboard |
 | `cli.py` | `scan`, `today`, `stats`, `dashboard`, `theme` commands |
+
+## Custom Alerts
+
+Define rules in `~/.claude/alerts.json` and the dashboard will evaluate them
+after every scan. Each rule pairs a *condition* (in a tiny safe DSL) with an
+*action* (shell command or HTTP webhook). Per-rule cooldowns prevent the
+same alert from firing repeatedly.
+
+Example `~/.claude/alerts.json`:
+
+```json
+[
+  {
+    "name": "Daily over $50",
+    "condition": "today_cost > 50",
+    "action": {"type": "shell", "cmd": "say 'Spending alert'"},
+    "cooldown_minutes": 60
+  },
+  {
+    "name": "Project budget hit",
+    "condition": "project == 'client-X' AND month_to_date > 200",
+    "action": {
+      "type": "webhook",
+      "url": "https://hooks.slack.com/services/...",
+      "payload": {"text": "Client X over budget"}
+    },
+    "cooldown_minutes": 30
+  }
+]
+```
+
+### Available variables
+
+| Variable | Meaning |
+|---|---|
+| `today_cost` | Total USD spent today across all models/projects |
+| `month_to_date` | Total USD spent this calendar month |
+| `turn_cost` | USD cost of the most recent turn |
+| `model` | Model id of the most recent turn (e.g. `claude-opus-4-7`) |
+| `project` | Project name of the most recent turn |
+
+### Supported operators
+
+Comparisons: `>`, `>=`, `<`, `<=`, `==`, `!=`. Boolean: `AND`, `OR`, `NOT`
+(uppercase or lowercase). String literals are single-quoted.
+
+### CLI
+
+```
+python3 cli.py alerts list                       # show every rule
+python3 cli.py alerts test                       # dry-run (no actions executed)
+python3 cli.py alerts trigger "Daily over $50"   # force-fire a rule
+```
+
+### Safety
+
+Conditions are parsed with `ast.parse()` and walked by a strict allowlist of
+node types (`Compare`, `BoolOp`, `Name`, `Constant`, `UnaryOp`). There is
+**no** call to `eval()` or `exec()` anywhere in the alerts pipeline -
+function calls, attribute access, imports, and subscripts are all rejected.
+Shell actions run via `subprocess.run` with a 10s timeout; webhooks via
+`urllib.request` with a 10s timeout.

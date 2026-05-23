@@ -2975,6 +2975,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 projects_dirs=scanner.DEFAULT_PROJECTS_DIRS,
                 verbose=False,
             )
+            # Evaluate user-defined alerts after the scan. Failures are
+            # surfaced in the response but never break the rescan.
+            try:
+                import alerts as _alerts
+                result["alerts"] = _alerts.evaluate_all()
+            except Exception as exc:  # pragma: no cover - defensive
+                result["alerts_error"] = str(exc)
             body = json.dumps(result).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
