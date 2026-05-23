@@ -1376,6 +1376,7 @@ def get_dashboard_data(db_path=DB_PATH):
                 total_cache_read, total_cache_creation, model, turn_count,
                 git_branch, session_name,
                 COALESCE(NULLIF(account, ''), 'default') AS account
+                git_branch, session_name, machine_id
             FROM sessions
             ORDER BY last_timestamp DESC
         """).fetchall()
@@ -1391,6 +1392,27 @@ def get_dashboard_data(db_path=DB_PATH):
             FROM sessions
             ORDER BY last_timestamp DESC
         """).fetchall()
+        # Pre-migration DB: synthesise session_name=None
+        try:
+            session_rows = conn.execute("""
+                SELECT
+                    session_id, project_name, first_timestamp, last_timestamp,
+                    total_input_tokens, total_output_tokens,
+                    total_cache_read, total_cache_creation, model, turn_count,
+                    git_branch, session_name, NULL AS machine_id
+                FROM sessions
+                ORDER BY last_timestamp DESC
+            """).fetchall()
+        except sqlite3.OperationalError:
+            session_rows = conn.execute("""
+                SELECT
+                    session_id, project_name, first_timestamp, last_timestamp,
+                    total_input_tokens, total_output_tokens,
+                    total_cache_read, total_cache_creation, model, turn_count,
+                    git_branch, NULL AS session_name, NULL AS machine_id
+                FROM sessions
+                ORDER BY last_timestamp DESC
+            """).fetchall()
 
     aliases = _load_project_aliases()
 
@@ -1445,6 +1467,7 @@ def get_dashboard_data(db_path=DB_PATH):
             "cache_hit_category":  ch.get("category", "low"),
             "cache_underusing":    ch.get("underusing", False),
             "account":       r["account"] or "default",
+            "machine_id":    (r["machine_id"] if "machine_id" in r.keys() else None) or "local",
         })
 
     year_calendar = _year_calendar(conn)
@@ -1521,6 +1544,30 @@ def get_dashboard_data(db_path=DB_PATH):
     )
     cache_1h_opportunities = _cache_1h_opportunities(conn)
 
+    # ── By-machine aggregation (workspace / team mode) ────────────────────────
+    # When every session was scanned on a single laptop this is a one-row list
+    # and the dashboard auto-hides the filter UI. In a shared-DB setup it gives
+    # a per-machine token / cost rollup.
+    machine_agg = {}
+    for s in sessions_all:
+        mid = s.get("machine_id") or "local"
+        m = machine_agg.setdefault(mid, {
+            "machine_id": mid, "sessions": 0, "turns": 0,
+            "input": 0, "output": 0,
+            "cache_read": 0, "cache_creation": 0,
+        })
+        m["sessions"] += 1
+        m["turns"] += s["turns"] or 0
+        m["input"] += s["input"] or 0
+        m["output"] += s["output"] or 0
+        m["cache_read"] += s["cache_read"] or 0
+        m["cache_creation"] += s["cache_creation"] or 0
+    by_machine = sorted(
+        machine_agg.values(),
+        key=lambda x: (-(x["input"] + x["output"]), x["machine_id"]),
+    )
+    all_machines = [m["machine_id"] for m in by_machine]
+
     conn.close()
 
     # ── Account summary (sessions + tokens per account, all-time) ─────────────
@@ -1537,6 +1584,7 @@ def get_dashboard_data(db_path=DB_PATH):
 
     return {
         "all_models":      all_models,
+        "all_machines":    all_machines,
         "daily_by_model":  daily_by_model,
         "hourly_by_model": hourly_by_model,
         "sessions_all":    sessions_all,
@@ -1553,6 +1601,7 @@ def get_dashboard_data(db_path=DB_PATH):
         "downgrade_suggestions":   downgrade_suggestions,
         "downgrade_total_savings": downgrade_total_savings,
         "accounts":        accounts,
+        "by_machine":      by_machine,
         "generated_at":    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "plan_recommendation": plan_recommendation,
         "generated_at":       datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -2157,6 +2206,13 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 </header>
 
 <div id="filter-bar">
+  <div id="machine-filter-wrap" data-machine-filter style="display:none; align-items:center; gap:10px;">
+    <div class="filter-label">Machine</div>
+    <select id="machine-select" onchange="onMachineChange(this.value)" style="background:var(--card);border:1px solid var(--border);border-radius:8px;padding:5px 10px;font-size:12px;color:var(--text);letter-spacing:-0.12px;cursor:pointer;">
+      <option value="">All machines</option>
+    </select>
+    <div class="filter-sep"></div>
+  </div>
   <div class="filter-label">Models</div>
   <div id="model-checkboxes"></div>
   <button class="filter-btn" onclick="selectAllModels()">All</button>
@@ -2529,6 +2585,29 @@ let lastByProjectBranch = [];
 let lastByBranch = [];
 let sessionSortDir = 'desc';
 let hourlyTZ = (_loadPrefs().hourlyTZ) || 'local';  // 'local' or 'utc'
+let selectedMachine = '';  // empty string = "all machines"
+
+function buildMachineFilterUI(machines) {
+  const wrap = document.getElementById('machine-filter-wrap');
+  const sel = document.getElementById('machine-select');
+  if (!wrap || !sel) return;
+  // Auto-hide when only one machine has reported in -- single-laptop install.
+  if (!machines || machines.length <= 1) {
+    wrap.style.display = 'none';
+    selectedMachine = '';
+    return;
+  }
+  wrap.style.display = 'flex';
+  const opts = ['<option value="">All machines</option>']
+    .concat(machines.map(m => `<option value="${esc(m)}">${esc(m)}</option>`));
+  sel.innerHTML = opts.join('');
+  sel.value = selectedMachine || '';
+}
+
+function onMachineChange(val) {
+  selectedMachine = val || '';
+  applyFilter();
+}
 
 // ── Peak-hour config ───────────────────────────────────────────────────────
 // Anthropic throttles Mon–Fri 05:00–11:00 PT. We approximate as fixed UTC hours
@@ -2920,6 +2999,12 @@ function applyFilter() {
   const inAccount = (s) => selectedAccount === 'all' || (s.account || 'default') === selectedAccount;
   const filteredSessions = rawData.sessions_all.filter(s =>
     selectedModels.has(s.model) && (!start || s.last_date >= start) && (!end || s.last_date <= end) && inAccount(s)
+  // Filter sessions by model + date range + machine
+  const filteredSessions = rawData.sessions_all.filter(s =>
+    selectedModels.has(s.model)
+    && (!start || s.last_date >= start)
+    && (!end || s.last_date <= end)
+    && (!selectedMachine || s.machine_id === selectedMachine)
   );
 
   // Add session counts into modelMap
@@ -4239,6 +4324,7 @@ function loadData() {
       buildFilterUI(d.all_models);
       // Build account dropdown (reads URL/prefs; hides itself when only 1 account)
       buildAccountUI(d.accounts || []);
+      buildMachineFilterUI(d.all_machines || []);
       updateSortIcons();
       updateModelSortIcons();
       updateProjectSortIcons();
