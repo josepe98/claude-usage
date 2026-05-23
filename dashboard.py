@@ -249,6 +249,22 @@ def _dow_hour_heatmap(conn):
     return grid
 
 
+TAGS_CONFIG_PATH = Path.home() / ".claude" / "tags.json"
+
+
+def _load_tags():
+    """Read user-defined session tags. Returns {} if unreadable."""
+    try:
+        return json.loads(TAGS_CONFIG_PATH.read_text())
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_tags(tags):
+    TAGS_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    TAGS_CONFIG_PATH.write_text(json.dumps(tags, indent=2, sort_keys=True))
+
+
 def get_dashboard_data(db_path=None):
     # Look up DB_PATH at call time, not at def time, so tests that patch
     # ``dashboard.DB_PATH`` (or ``scanner.DB_PATH``) are honoured.
@@ -394,6 +410,9 @@ def get_dashboard_data(db_path=None):
                   + (r["cw"] or 0) * _p["cache_write"]) / 1_000_000
     plan_recommendation = _plan_comparison(_pmtd)
     dow_hour = _dow_hour_heatmap(conn)
+    _tags_map = _load_tags()
+    for s in sessions_all:
+        s["tags"] = _tags_map.get(s["session_id"], [])
     conn.close()
 
     return {
@@ -1061,6 +1080,24 @@ function _onThemeQuickChange(id) {  // eslint-disable-line no-unused-vars
   const t = themes.find(x => x.id === id);
   if (!t) return;
   setTheme(t.css, t.id);
+}
+
+function _renderTags(s) {  // eslint-disable-line no-unused-vars
+  if (!s.tags || !s.tags.length) return "";
+  return s.tags.map(t => `<span style="display:inline-block;margin-left:4px;padding:1px 6px;border-radius:8px;font-size:10px;background:rgba(217,119,87,0.18);color:var(--accent);">${t}</span>`).join("");
+}
+
+function _promptTags(sid) {  // eslint-disable-line no-unused-vars
+  const s = (rawData && rawData.sessions_all || []).find(x => x.session_id === sid);
+  const cur = (s && s.tags || []).join(", ");
+  const v = prompt("Tags for " + sid + " (comma-separated, empty to clear):", cur);
+  if (v === null) return;
+  const tags = v.split(",").map(t => t.trim()).filter(Boolean);
+  fetch("/api/tags", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({session_id: sid, tags: tags}),
+  }).then(() => loadData());
 }
 
 function chartColors() {
@@ -2399,6 +2436,27 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
 
+        if path == "/api/tags":
+            length = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(length) if length else b"{}"
+            try:
+                req = json.loads(body)
+            except json.JSONDecodeError:
+                req = {}
+            sid = req.get("session_id")
+            tags = req.get("tags")
+            cfg = _load_tags()
+            if sid:
+                if not tags:
+                    cfg.pop(sid, None)
+                else:
+                    cfg[sid] = list(tags)
+                _save_tags(cfg)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"ok": True, "tags": cfg.get(sid, [])}).encode("utf-8"))
+            return
         if path == "/api/rescan":
             # Default: incremental scan (fast, non-destructive).
             # Opt-in full rebuild with ?full=1 — useful when pricing or
