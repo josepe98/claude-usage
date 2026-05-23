@@ -166,6 +166,67 @@ def get_themes():
     return list(themes.values())
 
 
+
+def _session_sparklines(conn, session_ids):
+    """For each session id, return a 30-bin sparkline (turns per equal-width
+    time bucket) spanning the session's first_timestamp -> last_timestamp.
+    Returns {session_id: [int, int, ...]}."""
+    if not session_ids:
+        return {}
+    out = {}
+    placeholders = ",".join("?" * len(session_ids))
+    rows = conn.execute(f"""
+        SELECT t.session_id, t.timestamp
+        FROM turns t
+        WHERE t.session_id IN ({placeholders}) AND t.timestamp IS NOT NULL
+        ORDER BY t.session_id, t.timestamp ASC
+    """, tuple(session_ids)).fetchall()
+    # Group timestamps by session
+    by_sid = {}
+    for r in rows:
+        by_sid.setdefault(r["session_id"], []).append(r["timestamp"])
+    BINS = 30
+    for sid, ts in by_sid.items():
+        if len(ts) < 2:
+            out[sid] = [len(ts)]
+            continue
+        # Convert to epoch-ish ordinal for bucketing (lexicographic timestamps work too).
+        first, last = ts[0], ts[-1]
+        # We just use ordinal position over total — coarse but enough for sparkline.
+        bins = [0] * BINS
+        first_dt = first
+        last_dt = last
+        if first_dt == last_dt:
+            bins[BINS - 1] = len(ts)
+            out[sid] = bins
+            continue
+        # Map each ts to a bucket by ratio of (ts - first) / (last - first).
+        # Use ISO-8601 string comparison; it works monotonically for our data
+        # and avoids parsing. For the bin index we still need a numeric ratio
+        # — convert via datetime when feasible.
+        from datetime import datetime as _dt
+        try:
+            fdt = _dt.fromisoformat(first.replace("Z", "+00:00"))
+            ldt = _dt.fromisoformat(last.replace("Z", "+00:00"))
+            span = (ldt - fdt).total_seconds()
+        except Exception:
+            span = 0
+        if span <= 0:
+            bins[BINS - 1] = len(ts)
+            out[sid] = bins
+            continue
+        for t in ts:
+            try:
+                tdt = _dt.fromisoformat(t.replace("Z", "+00:00"))
+                ratio = (tdt - fdt).total_seconds() / span
+            except Exception:
+                ratio = 1.0
+            idx = min(int(ratio * BINS), BINS - 1)
+            bins[idx] += 1
+        out[sid] = bins
+    return out
+
+
 def get_dashboard_data(db_path=DB_PATH):
     if not db_path.exists():
         return {"error": "Database not found. Run: python cli.py scan"}
@@ -278,6 +339,12 @@ def get_dashboard_data(db_path=DB_PATH):
             "cache_creation": r["total_cache_creation"] or 0,
         })
 
+    # Sparkline data per session (small turn-rate histogram for the UI).
+    _sparkline_data = _session_sparklines(
+        conn, [s["session_id"] for s in sessions_all]
+    )
+    for s in sessions_all:
+        s["sparkline"] = _sparkline_data.get(s["session_id"], [])
     conn.close()
 
     return {
@@ -1356,6 +1423,15 @@ function renderModelChart(byModel) {
   });
 }
 
+function _renderSparkline(bins) {  // eslint-disable-line no-unused-vars
+  if (!bins || !bins.length) return "";
+  const W = 60, H = 14;
+  const max = Math.max(1, ...bins);
+  const step = W / bins.length;
+  const pts = bins.map((v, i) => `${(i * step).toFixed(1)},${(H - (v / max) * H).toFixed(1)}`).join(" ");
+  return `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" style="vertical-align:middle;margin-left:4px;" aria-hidden="true"><polyline fill="none" stroke="var(--accent)" stroke-width="1" points="${pts}"></polyline></svg>`;
+}
+
 function renderProjectChart(byProject) {
   const top = byProject.slice(0, 10);
   const ctx = document.getElementById('chart-project').getContext('2d');
@@ -1388,7 +1464,7 @@ function renderSessionsTable(sessions) {
       ? `<td class="cost">${fmtCost(cost)}</td>`
       : `<td class="cost-na">n/a</td>`;
     const sessionCell = s.session_name
-      ? `<td><span class="session-name">${esc(s.session_name)}</span> <span class="muted" style="font-family:monospace">(${esc(s.session_id)}&hellip;)</span></td>`
+      ? `<td><span class="session-name">${esc(s.session_name)}</span> <span class="muted" style="font-family:monospace">(${esc(s.session_id)}${_renderSparkline(s.sparkline)}&hellip;)</span></td>`
       : `<td class="muted" style="font-family:monospace">${esc(s.session_id)}&hellip;</td>`;
     return `<tr>
       ${sessionCell}
