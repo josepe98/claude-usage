@@ -1691,6 +1691,30 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(render_html())
 
+        elif path == "/api/health":
+            # Lightweight liveness probe for Docker HEALTHCHECK / monitoring.
+            # Returns server + DB state without doing any aggregation.
+            payload = {
+                "status": "ok" if DB_PATH.exists() else "no-db",
+                "db_path": str(DB_PATH),
+                "sessions": 0,
+                "turns": 0,
+            }
+            try:
+                if DB_PATH.exists():
+                    c = sqlite3.connect(DB_PATH)
+                    payload["sessions"] = c.execute("select count(*) from sessions").fetchone()[0]
+                    payload["turns"] = c.execute("select count(*) from turns").fetchone()[0]
+                    c.close()
+            except Exception as e:  # noqa: BLE001
+                payload["status"] = "error"
+                payload["error"] = str(e)
+            body = json.dumps(payload).encode("utf-8")
+            self.send_response(200 if payload["status"] != "error" else 500)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
         elif path == "/api/data":
             data = get_dashboard_data()
             body = json.dumps(data).encode("utf-8")
