@@ -545,6 +545,20 @@ def _cost_per_turn_stats(conn):
         FROM turns
     """).fetchall()
     costs = []
+def _subagent_split(conn):
+    """Return {main: cost, subagent: cost, main_pct} from current PRICING.
+    Uses the convention that turns with tool_name='subagent' are delegated
+    (Cowork Task-spawn); everything else is main-thread."""
+    from pricing import get_pricing
+    rows = conn.execute("""
+        SELECT tool_name, model,
+               SUM(input_tokens) as inp, SUM(output_tokens) as out,
+               SUM(cache_read_tokens) as cr, SUM(cache_creation_tokens) as cw
+        FROM turns
+        GROUP BY tool_name, model
+    """).fetchall()
+    main = 0.0
+    sub = 0.0
     for r in rows:
         p = get_pricing(r["model"])
         if not p:
@@ -704,6 +718,39 @@ def _session_detail(session_id_prefix):
         "tools_breakdown": [{"tool": k, "count": v} for k, v in
                             sorted(tools.items(), key=lambda x: -x[1])],
         "total_cost": round(cum, 4),
+    }
+
+
+def _subagent_split(conn):
+    """Return {main: cost, subagent: cost, main_pct} from current PRICING.
+    Uses the convention that turns with tool_name='subagent' are delegated
+    (Cowork Task-spawn); everything else is main-thread."""
+    from pricing import get_pricing
+    rows = conn.execute("""
+        SELECT tool_name, model,
+               SUM(input_tokens) as inp, SUM(output_tokens) as out,
+               SUM(cache_read_tokens) as cr, SUM(cache_creation_tokens) as cw
+        FROM turns
+        GROUP BY tool_name, model
+    """).fetchall()
+    main = 0.0
+    sub = 0.0
+    for r in rows:
+        p = get_pricing(r["model"])
+        if not p:
+            continue
+        c = ((r["inp"] or 0) * p["input"] + (r["out"] or 0) * p["output"]
+             + (r["cr"] or 0) * p["cache_read"] + (r["cw"] or 0) * p["cache_write"]) / 1_000_000
+        if r["tool_name"] == "subagent":
+            sub += c
+        else:
+            main += c
+    total = main + sub
+    return {
+        "main": round(main, 2),
+        "subagent": round(sub, 2),
+        "main_pct": round((main / total * 100) if total > 0 else 0, 1),
+        "subagent_pct": round((sub / total * 100) if total > 0 else 0, 1),
     }
 
 
@@ -903,6 +950,7 @@ def get_dashboard_data(db_path=DB_PATH):
               + (r["cr"] or 0) * _p["cache_read"] + (r["cw"] or 0) * _p["cache_write"]) / 1_000_000
         _per_proj[r["project"]] = _per_proj.get(r["project"], 0) + _c
     project_budgets = _project_budget_status(_per_proj)
+    subagent_split = _subagent_split(conn)
     conn.close()
 
     return {
@@ -918,6 +966,7 @@ def get_dashboard_data(db_path=DB_PATH):
         "dow_hour":        dow_hour,
         "cost_histogram":  cost_histogram,
         "project_budgets": project_budgets,
+        "subagent_split": subagent_split,
         "generated_at":    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "plan_recommendation": plan_recommendation,
         "generated_at":       datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
