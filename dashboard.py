@@ -172,6 +172,9 @@ def get_dashboard_data(db_path=DB_PATH):
 
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
+    # Make sure tier-aware columns exist even if scan hasn't run yet on this DB.
+    import scanner
+    scanner._migrate_schema(conn)
 
     # ── All models (for filter UI) ────────────────────────────────────────────
     model_rows = conn.execute("""
@@ -191,6 +194,7 @@ def get_dashboard_data(db_path=DB_PATH):
             SUM(output_tokens)         as output,
             SUM(cache_read_tokens)     as cache_read,
             SUM(cache_creation_tokens) as cache_creation,
+            SUM(cache_1h_tokens) as cache_1h,
             COUNT(*)                   as turns
         FROM turns
         GROUP BY day, model
@@ -203,7 +207,7 @@ def get_dashboard_data(db_path=DB_PATH):
         "input":          r["input"] or 0,
         "output":         r["output"] or 0,
         "cache_read":     r["cache_read"] or 0,
-        "cache_creation": r["cache_creation"] or 0,
+        "cache_creation": r["cache_creation"], "cache_1h": r["cache_1h"] or 0,
         "turns":          r["turns"] or 0,
     } for r in daily_rows]
 
@@ -877,7 +881,8 @@ function calcCost(model, inp, out, cacheRead, cacheCreation) {
     inp           * p.input       / 1e6 +
     out           * p.output      / 1e6 +
     cacheRead     * p.cache_read  / 1e6 +
-    cacheCreation * p.cache_write / 1e6
+    (cacheCreation || 0) * (p.cache_write_5m || p.cache_write) / 1e6
+    + (cache1h || 0) * (p.cache_write_1h || (p.cache_write * 1.6)) / 1e6
   );
 }
 

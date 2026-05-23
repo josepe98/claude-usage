@@ -57,7 +57,8 @@ def cmd_today():
             SUM(input_tokens)          as inp,
             SUM(output_tokens)         as out,
             SUM(cache_read_tokens)     as cr,
-            SUM(cache_creation_tokens) as cc,
+            SUM(cache_creation_tokens)    as cc,
+            SUM(cache_1h_tokens)          as c1h,
             COUNT(*)                   as turns
         FROM turns
         WHERE substr(timestamp, 1, 10) = ?
@@ -121,7 +122,8 @@ def cmd_week():
             SUM(input_tokens)          as inp,
             SUM(output_tokens)         as out,
             SUM(cache_read_tokens)     as cr,
-            SUM(cache_creation_tokens) as cc,
+            SUM(cache_creation_tokens)    as cc,
+            SUM(cache_1h_tokens)          as c1h,
             COUNT(*)                   as turns
         FROM turns
         WHERE substr(timestamp, 1, 10) BETWEEN ? AND ?
@@ -134,7 +136,8 @@ def cmd_week():
             SUM(input_tokens)          as inp,
             SUM(output_tokens)         as out,
             SUM(cache_read_tokens)     as cr,
-            SUM(cache_creation_tokens) as cc,
+            SUM(cache_creation_tokens)    as cc,
+            SUM(cache_1h_tokens)          as c1h,
             COUNT(*)                   as turns
         FROM turns
         WHERE substr(timestamp, 1, 10) BETWEEN ? AND ?
@@ -221,6 +224,7 @@ def cmd_stats():
             SUM(output_tokens)            as out,
             SUM(cache_read_tokens)        as cr,
             SUM(cache_creation_tokens)    as cc,
+            SUM(cache_1h_tokens)          as c1h,
             COUNT(*)                      as turns
         FROM turns
     """).fetchone()
@@ -232,7 +236,8 @@ def cmd_stats():
             SUM(input_tokens)          as inp,
             SUM(output_tokens)         as out,
             SUM(cache_read_tokens)     as cr,
-            SUM(cache_creation_tokens) as cc,
+            SUM(cache_creation_tokens)    as cc,
+            SUM(cache_1h_tokens)          as c1h,
             COUNT(*)                   as turns,
             COUNT(DISTINCT session_id) as sessions
         FROM turns

@@ -105,8 +105,29 @@ def parse_audit_file(filepath):
                             meta["last_timestamp"] = timestamp
 
                 model_usage = record.get("modelUsage") or {}
+                # `result.usage.cache_creation.ephemeral_1h_input_tokens` is the
+                # session-wide 1h cache write count; modelUsage doesn't carry a
+                # per-model 1h/5m split. Distribute proportionally by each
+                # model's share of cacheCreationInputTokens — the same ratio
+                # Cowork sub-agent dispatching tends to follow in practice.
+                total_cc = sum(
+                    int((u or {}).get("cacheCreationInputTokens", 0) or 0)
+                    for u in model_usage.values()
+                )
+                result_usage = record.get("usage") or {}
+                cc_breakdown = result_usage.get("cache_creation") or {}
+                ephemeral_1h_total = int(cc_breakdown.get("ephemeral_1h_input_tokens", 0) or 0)
                 for model_raw, usage in model_usage.items():
                     model = _normalise_model(model_raw)
+                    cache_creation = int(usage.get("cacheCreationInputTokens", 0) or 0)
+                    if total_cc > 0 and ephemeral_1h_total > 0:
+                        ratio = cache_creation / total_cc
+                        cache_1h = int(round(ephemeral_1h_total * ratio))
+                        # never exceed the model's own cache_creation
+                        cache_1h = min(cache_1h, cache_creation)
+                    else:
+                        cache_1h = 0
+                    cache_5m = cache_creation - cache_1h
                     msg_idx += 1
                     turns.append({
                         "session_id": session_id,
@@ -115,7 +136,8 @@ def parse_audit_file(filepath):
                         "input_tokens": int(usage.get("inputTokens", 0) or 0),
                         "output_tokens": int(usage.get("outputTokens", 0) or 0),
                         "cache_read_tokens": int(usage.get("cacheReadInputTokens", 0) or 0),
-                        "cache_creation_tokens": int(usage.get("cacheCreationInputTokens", 0) or 0),
+                        "cache_creation_tokens": cache_5m,
+                        "cache_1h_tokens": cache_1h,
                         "tool_name": None,
                         "cwd": project_name,
                         "message_id": f"cowork-{session_id}-{msg_idx}-{model}",
