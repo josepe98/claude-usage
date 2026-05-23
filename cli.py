@@ -12,6 +12,7 @@ Commands:
 import os
 import shutil
 import subprocess
+import json
 import sys
 import json
 import sqlite3
@@ -939,6 +940,37 @@ def cmd_timeline(session_id, out=None):
 
 
 
+# ── Inbound webhook viewer ────────────────────────────────────────────────────
+
+def cmd_inbound(tail=20):
+    """Print the most recent events from ~/.claude/inbound.jsonl.
+    Reads via dashboard.read_inbound_events so the wire format and parser
+    stay in sync with the HTTP endpoint."""
+    from dashboard import read_inbound_events, INBOUND_LOG
+    try:
+        n = int(tail) if tail is not None else 20
+    except (TypeError, ValueError):
+        n = 20
+    n = max(1, min(n, 1000))
+    events = read_inbound_events(limit=n)
+    if not events:
+        print(f"No inbound events. (Looked at {INBOUND_LOG})")
+        return
+    # read_inbound_events returns newest-first; print oldest-first so the
+    # latest event lands at the bottom of the terminal where the cursor is.
+    for ev in reversed(events):
+        ts = ev.get("received_at", "?")
+        typ = ev.get("type", "?")
+        ip = ev.get("source_ip", "?")
+        payload = ev.get("payload", {})
+        try:
+            payload_str = json.dumps(payload, separators=(",", ":"))
+        except (TypeError, ValueError):
+            payload_str = str(payload)
+        print(f"[{ts}] {typ}  from={ip}  {payload_str}")
+    print(f"\n({len(events)} event{'s' if len(events) != 1 else ''} shown from {INBOUND_LOG})")
+
+
 # ── Theme command ──────────────────────────────────────────────────────────────
 
 def cmd_theme():
@@ -1660,6 +1692,7 @@ Usage:
   python3 cli.py tray [--url URL]                 Launch tray / menu-bar app
   python3 cli.py alerts <list|test|trigger NAME>  Manage custom alert rules
   python3 cli.py import-workbench <PATH>          Import an Anthropic Console/Workbench JSON export
+  python3 cli.py inbound [--tail N]               Show recent inbound webhook events
 """
 
 COMMANDS = {
@@ -1680,6 +1713,7 @@ COMMANDS = {
     "alerts": cmd_alerts,
     "import-workbench": cmd_import_workbench,
     "timeline": cmd_timeline,
+    "inbound": cmd_inbound,
 }
 
 def parse_named_arg(args, flag):
@@ -1744,5 +1778,7 @@ if __name__ == "__main__":
             print("Usage: python3 cli.py timeline <session_id> [--out FILE]")
             sys.exit(1)
         cmd_timeline(rest[0], out=parse_named_arg(rest, "--out"))
+    elif command == "inbound":
+        cmd_inbound(tail=parse_named_arg(rest, "--tail"))
     else:
         COMMANDS[command]()
