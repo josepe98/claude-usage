@@ -6,7 +6,7 @@ import json
 import os
 import sqlite3
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 from pathlib import Path
 
 from pricing import PRICING
@@ -268,11 +268,13 @@ def get_dashboard_data(db_path=DB_PATH):
         except Exception:
             duration_min = 0
         sessions_all.append({
-            "session_id":    r["session_id"][:8],
-            "session_name":  r["session_name"] or "",
-            "project":       r["project_name"] or "unknown",
-            "branch":        r["git_branch"] or "",
-            "last":          (r["last_timestamp"] or "")[:16].replace("T", " "),
+            "session_id":      r["session_id"][:8],
+            "session_id_full": r["session_id"],
+            "session_name":    r["session_name"] or "",
+            "project":         r["project_name"] or "unknown",
+            "branch":          r["git_branch"] or "",
+            "first":           (r["first_timestamp"] or "")[:16].replace("T", " "),
+            "last":            (r["last_timestamp"] or "")[:16].replace("T", " "),
             "last_date":     (r["last_timestamp"] or "")[:10],
             "duration_min":  duration_min,
             "model":         r["model"] or "unknown",
@@ -291,6 +293,99 @@ def get_dashboard_data(db_path=DB_PATH):
         "hourly_by_model": hourly_by_model,
         "sessions_all":    sessions_all,
         "generated_at":    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
+def get_session_detail(session_id, db_path=DB_PATH):
+    if not db_path.exists():
+        return {"error": "Database not found. Run: python3 cli.py scan"}
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+
+    session = conn.execute("""
+        SELECT
+            session_id, project_name, first_timestamp, last_timestamp, git_branch,
+            total_input_tokens, total_output_tokens,
+            total_cache_read, total_cache_creation, model, turn_count
+        FROM sessions
+        WHERE session_id = ?
+    """, (session_id,)).fetchone()
+
+    if session is None:
+        conn.close()
+        return {"error": "Session not found"}
+
+    turn_rows = conn.execute("""
+        SELECT
+            timestamp, model, input_tokens, output_tokens,
+            cache_read_tokens, cache_creation_tokens, cache_1h_tokens, tool_name, cwd
+        FROM turns
+        WHERE session_id = ?
+        ORDER BY timestamp ASC, id ASC
+    """, (session_id,)).fetchall()
+
+    turns = []
+    tool_usage = {}
+    cwd_counts = {}
+
+    for r in turn_rows:
+        tool_name = r["tool_name"] or "reply"
+        cwd = r["cwd"] or "unknown"
+        total_tokens = (
+            (r["input_tokens"] or 0) +
+            (r["output_tokens"] or 0) +
+            (r["cache_read_tokens"] or 0) +
+            (r["cache_creation_tokens"] or 0) +
+            (r["cache_1h_tokens"] or 0)
+        )
+        turns.append({
+            "timestamp":       r["timestamp"] or "",
+            "timestamp_short": (r["timestamp"] or "")[:16].replace("T", " "),
+            "model":           r["model"] or "unknown",
+            "tool_name":       tool_name,
+            "cwd":             cwd,
+            "input":           r["input_tokens"] or 0,
+            "output":          r["output_tokens"] or 0,
+            "cache_read":      r["cache_read_tokens"] or 0,
+            "cache_creation":  r["cache_creation_tokens"] or 0,
+            "cache_1h":        r["cache_1h_tokens"] or 0,
+            "total":           total_tokens,
+        })
+
+        stats = tool_usage.setdefault(tool_name, {"tool_name": tool_name, "turns": 0, "tokens": 0})
+        stats["turns"] += 1
+        stats["tokens"] += total_tokens
+        cwd_counts[cwd] = cwd_counts.get(cwd, 0) + 1
+
+    conn.close()
+
+    try:
+        t1 = datetime.fromisoformat((session["first_timestamp"] or "").replace("Z", "+00:00"))
+        t2 = datetime.fromisoformat((session["last_timestamp"] or "").replace("Z", "+00:00"))
+        duration_min = round((t2 - t1).total_seconds() / 60, 1)
+    except Exception:
+        duration_min = 0
+
+    return {
+        "session_id":     session["session_id"],
+        "project":        session["project_name"] or "unknown",
+        "branch":         session["git_branch"] or "",
+        "first":          (session["first_timestamp"] or "")[:19].replace("T", " "),
+        "last":           (session["last_timestamp"] or "")[:19].replace("T", " "),
+        "duration_min":   duration_min,
+        "model":          session["model"] or "unknown",
+        "turns":          session["turn_count"] or 0,
+        "input":          session["total_input_tokens"] or 0,
+        "output":         session["total_output_tokens"] or 0,
+        "cache_read":     session["total_cache_read"] or 0,
+        "cache_creation": session["total_cache_creation"] or 0,
+        "tool_usage":     sorted(tool_usage.values(), key=lambda item: (-item["tokens"], item["tool_name"])),
+        "cwd_usage":      sorted(
+            [{"cwd": c, "turns": n} for c, n in cwd_counts.items()],
+            key=lambda item: (-item["turns"], item["cwd"])
+        ),
+        "turn_history":   turns,
     }
 
 
@@ -623,7 +718,25 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .footer-content a { color: var(--accent); text-decoration: none; }
   .footer-content a:hover { text-decoration: underline; }
 
-  @media (max-width: 768px) { .charts-grid { grid-template-columns: 1fr; } .chart-card.wide { grid-column: 1; } }
+  tr.session-row { cursor: pointer; }
+  tr.session-row.selected td { background: rgba(0,113,227,0.06); }
+  .detail-grid { display: grid; grid-template-columns: 1.2fr 0.8fr; gap: 16px; }
+  .detail-card { background: rgba(0,0,0,0.02); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+  .detail-card h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin-bottom: 12px; }
+  .detail-meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .detail-meta .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 4px; }
+  .detail-meta .value { font-size: 13px; }
+  .pill-list { display: flex; flex-wrap: wrap; gap: 8px; }
+  .pill { border: 1px solid var(--border); border-radius: 999px; padding: 5px 10px; font-size: 12px; color: var(--text); background: rgba(0,0,0,0.02); }
+  .detail-table-wrap { max-height: 360px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
+  .detail-table-wrap table th { position: sticky; top: 0; background: var(--card); }
+  .hint { color: var(--muted); font-size: 12px; }
+
+  @media (max-width: 768px) {
+    .charts-grid { grid-template-columns: 1fr; }
+    .chart-card.wide { grid-column: 1; }
+    .detail-grid { grid-template-columns: 1fr; }
+  }
 </style>
 </head>
 <body>
@@ -702,6 +815,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   </div>
   <div class="table-card">
     <div class="section-header"><div class="section-title">Recent Sessions</div><button class="export-btn" onclick="exportSessionsCSV()" title="Export all filtered sessions to CSV">&#x2913; CSV</button></div>
+    <div class="hint" style="margin-bottom:12px;">Click a session row for branch, tool, cwd, and turn history detail.</div>
     <table>
       <thead><tr>
         <th>Session</th>
@@ -716,6 +830,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       </tr></thead>
       <tbody id="sessions-body"></tbody>
     </table>
+  </div>
+  <div class="table-card" id="session-detail-card" style="display:none;">
+    <div class="section-title">Session Detail</div>
+    <div id="session-detail"></div>
   </div>
   <div class="table-card">
     <div class="section-header"><div class="section-title">Cost by Project</div><button class="export-btn" onclick="exportProjectsCSV()" title="Export all projects to CSV">&#x2913; CSV</button></div>
@@ -798,6 +916,7 @@ function esc(s) {
 let rawData = null;
 let selectedModels = new Set();
 let selectedRange = '30d';
+let selectedSessionId = null;
 let charts = {};
 let sessionSortCol = 'last';
 let modelSortCol = 'cost';
@@ -1196,6 +1315,97 @@ function applyFilter() {
   renderModelCostTable(byModel);
   renderProjectCostTable(lastByProject.slice(0, 20));
   renderProjectBranchCostTable(lastByProjectBranch.slice(0, 20));
+
+  const visibleSessions = lastFilteredSessions.slice(0, 20);
+  if (!visibleSessions.length) {
+    selectedSessionId = null;
+    document.getElementById('session-detail-card').style.display = 'none';
+    return;
+  }
+  if (!selectedSessionId || !visibleSessions.some(s => s.session_id_full === selectedSessionId)) {
+    selectedSessionId = visibleSessions[0].session_id_full;
+  }
+  selectSession(selectedSessionId);
+}
+
+function selectSession(sessionId) {
+  selectedSessionId = sessionId;
+  document.querySelectorAll('tr.session-row').forEach(row =>
+    row.classList.toggle('selected', row.dataset.sessionId === sessionId)
+  );
+  loadSessionDetail(sessionId);
+}
+
+async function loadSessionDetail(sessionId) {
+  if (!sessionId) return;
+  try {
+    const resp = await fetch('/api/session?session_id=' + encodeURIComponent(sessionId));
+    if (selectedSessionId !== sessionId) return;
+    const detail = await resp.json();
+    if (detail.error) return;
+    renderSessionDetail(detail);
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+function renderSessionDetail(detail) {
+  const detailCard = document.getElementById('session-detail-card');
+  detailCard.style.display = '';
+
+  const toolPills = detail.tool_usage.length
+    ? detail.tool_usage.map(t => `<span class="pill">${esc(t.tool_name)} · ${fmt(t.tokens)} tokens · ${fmt(t.turns)} turns</span>`).join('')
+    : '<div class="hint">No tool usage recorded.</div>';
+
+  const cwdPills = detail.cwd_usage.length
+    ? detail.cwd_usage.map(c => `<span class="pill">${esc(c.cwd)} · ${fmt(c.turns)} turns</span>`).join('')
+    : '<div class="hint">No working directory recorded.</div>';
+
+  document.getElementById('session-detail').innerHTML = `
+    <div class="detail-meta">
+      <div><div class="label">Session</div><div class="value" style="font-family:monospace">${esc(detail.session_id)}</div></div>
+      <div><div class="label">Project</div><div class="value">${esc(detail.project)}</div></div>
+      <div><div class="label">Branch</div><div class="value">${esc(detail.branch || 'n/a')}</div></div>
+      <div><div class="label">Model</div><div class="value">${esc(detail.model)}</div></div>
+      <div><div class="label">First Seen</div><div class="value">${esc(detail.first)}</div></div>
+      <div><div class="label">Last Seen</div><div class="value">${esc(detail.last)}</div></div>
+      <div><div class="label">Duration</div><div class="value">${esc(String(detail.duration_min))}m</div></div>
+      <div><div class="label">Tokens</div><div class="value">${fmt(detail.input + detail.output + detail.cache_read + detail.cache_creation)}</div></div>
+    </div>
+    <div class="detail-grid">
+      <div class="detail-card">
+        <h3>Turn History</h3>
+        <div class="detail-table-wrap">
+          <table>
+            <thead><tr>
+              <th>Time</th><th>Tool</th><th>Model</th><th>Input</th><th>Output</th><th>Cache Read</th><th>Cache Write</th><th>Total</th>
+            </tr></thead>
+            <tbody>${detail.turn_history.map(t => `
+              <tr>
+                <td class="muted">${esc(t.timestamp_short)}</td>
+                <td>${esc(t.tool_name)}</td>
+                <td>${esc(t.model)}</td>
+                <td class="num">${fmt(t.input)}</td>
+                <td class="num">${fmt(t.output)}</td>
+                <td class="num">${fmt(t.cache_read)}</td>
+                <td class="num">${fmt((t.cache_creation || 0) + (t.cache_1h || 0))}</td>
+                <td class="num">${fmt(t.total)}</td>
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div>
+        <div class="detail-card" style="margin-bottom:16px;">
+          <h3>Tool Usage</h3>
+          <div class="pill-list">${toolPills}</div>
+        </div>
+        <div class="detail-card">
+          <h3>Working Directories</h3>
+          <div class="pill-list">${cwdPills}</div>
+        </div>
+      </div>
+    </div>`;
 }
 
 // ── Renderers ──────────────────────────────────────────────────────────────
@@ -1396,7 +1606,7 @@ function renderSessionsTable(sessions) {
     const sessionCell = s.session_name
       ? `<td><span class="session-name">${esc(s.session_name)}</span> <span class="muted" style="font-family:monospace">(${esc(s.session_id)}&hellip;)</span></td>`
       : `<td class="muted" style="font-family:monospace">${esc(s.session_id)}&hellip;</td>`;
-    return `<tr>
+    return `<tr class="session-row ${selectedSessionId === s.session_id_full ? 'selected' : ''}" data-session-id="${esc(s.session_id_full)}">
       ${sessionCell}
       <td>${esc(s.project)}</td>
       <td class="muted">${esc(s.last)}</td>
@@ -1408,6 +1618,10 @@ function renderSessionsTable(sessions) {
       ${costCell}
     </tr>`;
   }).join('');
+  document.getElementById('sessions-body').addEventListener('click', function(e) {
+    const row = e.target.closest('tr.session-row');
+    if (row) selectSession(row.dataset.sessionId);
+  });
 }
 
 function setModelSort(col) {
@@ -1701,6 +1915,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
             data = get_dashboard_data()
             body = json.dumps(data).encode("utf-8")
             self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        elif path == "/api/session":
+            parsed_url = urlparse(self.path)
+            session_id = parse_qs(parsed_url.query).get("session_id", [""])[0]
+            data = get_session_detail(session_id)
+            body = json.dumps(data).encode("utf-8")
+            self.send_response(200 if "error" not in data else 404)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
