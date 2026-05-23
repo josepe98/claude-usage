@@ -2773,11 +2773,40 @@ def render_html():
     ).encode("utf-8")
 
 
+
+# Share / read-only mode.
+# When SHARE_TOKEN is set, every request must include ?token=<value> in the
+# query string (or X-Dashboard-Token header). Mutating endpoints (rescan,
+# budget) return 403 regardless of token — share mode is read-only.
+SHARE_TOKEN = None  # set by serve(share_token=...)
+
+
+def _check_share_access(handler):
+    """Verify share token (if mode is on). Returns True if request may proceed."""
+    if not SHARE_TOKEN:
+        return True
+    # Header takes precedence; otherwise query param.
+    tok = handler.headers.get("X-Dashboard-Token")
+    if not tok:
+        from urllib.parse import urlparse, parse_qs
+        q = parse_qs(urlparse(handler.path).query)
+        tok = (q.get("token") or [None])[0]
+    if tok == SHARE_TOKEN:
+        return True
+    handler.send_response(401)
+    handler.send_header("Content-Type", "text/plain")
+    handler.end_headers()
+    handler.wfile.write(b"Unauthorized: missing or invalid token.")
+    return False
+
+
 class DashboardHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
 
     def do_GET(self):
+        if not _check_share_access(self):
+            return
         # self.path includes the query string, but every URL the UI emits has
         # one (e.g. "/?range=all"); compare the bare path so bookmarkable
         # URLs don't fall through to 404.
@@ -2913,6 +2942,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
     def do_POST(self):
+        if not _check_share_access(self):
+            return
+        if SHARE_TOKEN:
+            # Read-only share mode: writes are never allowed.
+            self.send_response(403)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"Forbidden: dashboard is in read-only share mode.")
+            return
         path = urlparse(self.path).path
         if path == "/api/reset":
             # Wipe usage.db entirely. Caller is expected to re-run scan
@@ -2986,7 +3024,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
 
-def serve(host=None, port=None):
+def serve(host=None, port=None, share_token=None):
+    global SHARE_TOKEN
+    SHARE_TOKEN = share_token
     host = host or os.environ.get("HOST", "localhost")
     port = port or int(os.environ.get("PORT", "8080"))
     ThreadingHTTPServer.allow_reuse_address = True
