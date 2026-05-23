@@ -756,6 +756,41 @@ def cmd_report(period="30d", out=None):
         print(f"Report written to {out}")
     else:
         print(report)
+def cmd_time():
+    """Print time-on-task breakdown for the trailing 30 days."""
+    from dashboard import _time_on_task
+    conn = require_db()
+    rows = _time_on_task(conn)
+    conn.close()
+
+    def fmt_min(m):
+        if m < 1:
+            return "0m"
+        if m < 60:
+            return f"{round(m)}m"
+        h, mm = divmod(int(round(m)), 60)
+        return f"{h}h {mm:02d}m" if mm else f"{h}h"
+
+    today_min = rows[-1]["active_minutes"] if rows else 0.0
+    total = sum(r["active_minutes"] for r in rows)
+    avg = (total / len(rows)) if rows else 0.0
+
+    print()
+    hr("=")
+    print("  Time on Task  (active coding minutes, last 30 days)")
+    print("  Active = sum of intra-session turn gaps under 5 minutes")
+    hr("=")
+    print(f"  Today:        {fmt_min(today_min)}")
+    print(f"  30-day avg:   {fmt_min(avg)}")
+    print(f"  30-day total: {fmt_min(total)}")
+    hr()
+    print("  Per Day:")
+    for r in rows:
+        bar_len = int(r["active_minutes"] / max(1.0, max(x["active_minutes"] for x in rows) or 1.0) * 30)
+        bar = "#" * bar_len
+        print(f"    {r['day']}  {fmt_min(r['active_minutes']):>9}  {bar}")
+    hr("=")
+    print()
 
 
 def cmd_dashboard(projects_dir=None, host=None, port=None):
@@ -1680,6 +1715,7 @@ Usage:
   python3 cli.py today                            Show today's usage summary
   python3 cli.py week                             Show last 7 days (per-day + by-model)
   python3 cli.py stats                            Show all-time statistics
+  python3 cli.py time                             Show time-on-task (last 30 days)
   python3 cli.py dashboard [--projects-dir PATH] [--host HOST] [--port PORT]
                                                  Scan + start dashboard
   python3 cli.py report [--period 7d|30d|all] [--out FILE]
@@ -1704,6 +1740,7 @@ COMMANDS = {
     "forecast": cmd_forecast,
     "export": cmd_export,
     "budget": cmd_budget,
+    "time": cmd_time,
     "dashboard": cmd_dashboard,
     "report": cmd_report,
     "theme": cmd_theme,
