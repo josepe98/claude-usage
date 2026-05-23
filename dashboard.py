@@ -627,7 +627,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <div style="display:flex;align-items:center;gap:12px">
     <div class="meta" id="meta">Loading...</div>
     <button id="rescan-btn" onclick="triggerRescan()" title="Rebuild the database from scratch by re-scanning all JSONL files. Use if data looks stale or costs seem wrong.">&#x21bb; Rescan</button>
-    <button class="appearance-btn" onclick="window.open('/themes','_blank')">Appearance</button>
+    <select id="theme-quick" onchange="_onThemeQuickChange(this.value)" title="Quick-switch theme" style="background: var(--card); border: 1px solid var(--border); border-radius: 6px; color: var(--text); padding: 4px 8px; font-size: 12px; margin-right: 6px;"></select>
+      <button class="appearance-btn" onclick="window.open('/themes','_blank')">Appearance</button>
   </div>
 </header>
 
@@ -769,6 +770,28 @@ function setTheme(css, id) {
   const css = localStorage.getItem('dashboard-theme-css');
   if (css) document.getElementById('active-theme').textContent = css;
 })();
+
+async function _populateThemeDropdown() {  // eslint-disable-line no-unused-vars
+  try {
+    const sel = document.getElementById("theme-quick");
+    if (!sel) return;
+    const r = await fetch("/api/themes");
+    const themes = await r.json();
+    const current = localStorage.getItem("dashboard-theme-id") || "apple";
+    sel.innerHTML = themes.map(t =>
+      \`<option value="\${t.id}" \${t.id === current ? "selected" : ""}>\${t.name}</option>\`
+    ).join("");
+    // Cache themes for instant switching without another fetch
+    window._cachedThemes = themes;
+  } catch (e) { /* gallery / themes API not present — fine */ }
+}
+
+function _onThemeQuickChange(id) {  // eslint-disable-line no-unused-vars
+  const themes = window._cachedThemes || [];
+  const t = themes.find(x => x.id === id);
+  if (!t) return;
+  setTheme(t.css, t.id);
+}
 
 function chartColors() {
   const s = getComputedStyle(document.documentElement);
@@ -1604,7 +1627,7 @@ async function triggerRescan() {
     const resp = await fetch('/api/rescan', { method: 'POST' });
     const d = await resp.json();
     btn.textContent = '\u21bb Rescan (' + d.new + ' new, ' + d.updated + ' updated)';
-    await loadData();
+    await loadData(); _populateThemeDropdown();
   } catch(e) {
     btn.textContent = '\u21bb Rescan (error)';
     console.error(e);
