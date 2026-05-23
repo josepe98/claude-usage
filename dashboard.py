@@ -387,21 +387,32 @@ def get_dashboard_data(db_path=None):
                 session_id, project_name, first_timestamp, last_timestamp,
                 total_input_tokens, total_output_tokens,
                 total_cache_read, total_cache_creation, model, turn_count,
-                git_branch, session_name
+                git_branch, session_name, machine_id
             FROM sessions
             ORDER BY last_timestamp DESC
         """).fetchall()
     except sqlite3.OperationalError:
         # Pre-migration DB: synthesise session_name=None
-        session_rows = conn.execute("""
-            SELECT
-                session_id, project_name, first_timestamp, last_timestamp,
-                total_input_tokens, total_output_tokens,
-                total_cache_read, total_cache_creation, model, turn_count,
-                git_branch, NULL AS session_name
-            FROM sessions
-            ORDER BY last_timestamp DESC
-        """).fetchall()
+        try:
+            session_rows = conn.execute("""
+                SELECT
+                    session_id, project_name, first_timestamp, last_timestamp,
+                    total_input_tokens, total_output_tokens,
+                    total_cache_read, total_cache_creation, model, turn_count,
+                    git_branch, session_name, NULL AS machine_id
+                FROM sessions
+                ORDER BY last_timestamp DESC
+            """).fetchall()
+        except sqlite3.OperationalError:
+            session_rows = conn.execute("""
+                SELECT
+                    session_id, project_name, first_timestamp, last_timestamp,
+                    total_input_tokens, total_output_tokens,
+                    total_cache_read, total_cache_creation, model, turn_count,
+                    git_branch, NULL AS session_name, NULL AS machine_id
+                FROM sessions
+                ORDER BY last_timestamp DESC
+            """).fetchall()
 
     sessions_all = []
     for r in session_rows:
@@ -427,6 +438,7 @@ def get_dashboard_data(db_path=None):
             "output":        r["total_output_tokens"] or 0,
             "cache_read":    r["total_cache_read"] or 0,
             "cache_creation": r["total_cache_creation"] or 0,
+            "machine_id":    (r["machine_id"] if "machine_id" in r.keys() else None) or "local",
         })
 
     # Plan comparison — compute month-to-date USD inline.
@@ -454,18 +466,45 @@ def get_dashboard_data(db_path=None):
     _tags_map = _load_tags()
     for s in sessions_all:
         s["tags"] = _tags_map.get(s["session_id"], [])
+
+    # ── By-machine aggregation (workspace / team mode) ────────────────────────
+    # When every session was scanned on a single laptop this is a one-row list
+    # and the dashboard auto-hides the filter UI. In a shared-DB setup it gives
+    # a per-machine token / cost rollup.
+    machine_agg = {}
+    for s in sessions_all:
+        mid = s.get("machine_id") or "local"
+        m = machine_agg.setdefault(mid, {
+            "machine_id": mid, "sessions": 0, "turns": 0,
+            "input": 0, "output": 0,
+            "cache_read": 0, "cache_creation": 0,
+        })
+        m["sessions"] += 1
+        m["turns"] += s["turns"] or 0
+        m["input"] += s["input"] or 0
+        m["output"] += s["output"] or 0
+        m["cache_read"] += s["cache_read"] or 0
+        m["cache_creation"] += s["cache_creation"] or 0
+    by_machine = sorted(
+        machine_agg.values(),
+        key=lambda x: (-(x["input"] + x["output"]), x["machine_id"]),
+    )
+    all_machines = [m["machine_id"] for m in by_machine]
+
     streak = _compute_streak(conn)
     conn.close()
 
     return {
         "all_models":      all_models,
+        "all_machines":    all_machines,
         "daily_by_model":  daily_by_model,
         "hourly_by_model": hourly_by_model,
         "sessions_all":    sessions_all,
+        "by_machine":      by_machine,
         "plan_recommendation": plan_recommendation,
         "dow_hour":        dow_hour,
         "streak":          streak,
-        "generated_at":       datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "generated_at":    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
 
@@ -1124,6 +1163,13 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 </header>
 
 <div id="filter-bar">
+  <div id="machine-filter-wrap" data-machine-filter style="display:none; align-items:center; gap:10px;">
+    <div class="filter-label">Machine</div>
+    <select id="machine-select" onchange="onMachineChange(this.value)" style="background:var(--card);border:1px solid var(--border);border-radius:8px;padding:5px 10px;font-size:12px;color:var(--text);letter-spacing:-0.12px;cursor:pointer;">
+      <option value="">All machines</option>
+    </select>
+    <div class="filter-sep"></div>
+  </div>
   <div class="filter-row">
     <div class="filter-label">Models</div>
     <div id="model-checkboxes"></div>
@@ -1383,6 +1429,29 @@ let lastByProjectBranch = [];
 let lastByModel = [];
 let sessionSortDir = 'desc';
 let hourlyTZ = (_loadPrefs().hourlyTZ) || 'local';  // 'local' or 'utc'
+let selectedMachine = '';  // empty string = "all machines"
+
+function buildMachineFilterUI(machines) {
+  const wrap = document.getElementById('machine-filter-wrap');
+  const sel = document.getElementById('machine-select');
+  if (!wrap || !sel) return;
+  // Auto-hide when only one machine has reported in -- single-laptop install.
+  if (!machines || machines.length <= 1) {
+    wrap.style.display = 'none';
+    selectedMachine = '';
+    return;
+  }
+  wrap.style.display = 'flex';
+  const opts = ['<option value="">All machines</option>']
+    .concat(machines.map(m => `<option value="${esc(m)}">${esc(m)}</option>`));
+  sel.innerHTML = opts.join('');
+  sel.value = selectedMachine || '';
+}
+
+function onMachineChange(val) {
+  selectedMachine = val || '';
+  applyFilter();
+}
 
 // ── Peak-hour config ───────────────────────────────────────────────────────
 // Anthropic throttles Mon–Fri 05:00–11:00 PT. We approximate as fixed UTC hours
@@ -1725,9 +1794,12 @@ function applyFilter() {
     m.turns          += r.turns;
   }
 
-  // Filter sessions by model + date range
+  // Filter sessions by model + date range + machine + search
   const filteredSessions = rawData.sessions_all.filter(s => _matchesSearch(s) &&
-    selectedModels.has(s.model) && (!start || s.last_date >= start) && (!end || s.last_date <= end)
+    selectedModels.has(s.model)
+    && (!start || s.last_date >= start)
+    && (!end || s.last_date <= end)
+    && (!selectedMachine || s.machine_id === selectedMachine)
   );
 
   // Add session counts into modelMap
@@ -2710,6 +2782,7 @@ async function loadData() {
       );
       // Build model filter (reads URL for model selection too)
       buildFilterUI(d.all_models);
+      buildMachineFilterUI(d.all_machines || []);
       updateSortIcons();
       updateModelSortIcons();
       updateProjectSortIcons();
