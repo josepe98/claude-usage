@@ -1158,6 +1158,17 @@ function applyFilter() {
   const byProjectBranch = Object.values(projBranchMap).sort((a, b) => b.cost - a.cost);
 
   // Totals
+  // Count distinct models that have token usage in the filtered window but
+  // aren't priced (e.g. router proxies, custom finetunes). The Est. Cost
+  // card aggregates only billable models; this lets us tell the user how
+  // many models we silently dropped.
+  const nonBillableModels = new Set();
+  for (const r of filteredDaily) {
+    if (!isBillable(r.model) && (r.input + r.output) > 0) {
+      nonBillableModels.add(r.model);
+    }
+  }
+
   const totals = {
     sessions:       filteredSessions.length,
     turns:          byModel.reduce((s, m) => s + m.turns, 0),
@@ -1166,6 +1177,8 @@ function applyFilter() {
     cache_read:     byModel.reduce((s, m) => s + m.cache_read, 0),
     cache_creation: byModel.reduce((s, m) => s + m.cache_creation, 0),
     cost:           byModel.reduce((s, m) => s + calcCost(m.model, m.input, m.output, m.cache_read, m.cache_creation), 0),
+    nonBillableCount: nonBillableModels.size,
+    nonBillableModels: Array.from(nonBillableModels),
   };
 
   // Hourly aggregation (filtered by model + range, then bucketed by UTC hour)
@@ -1193,6 +1206,19 @@ function applyFilter() {
 }
 
 // ── Renderers ──────────────────────────────────────────────────────────────
+function _costSub(t) {
+  const base = 'API pricing, Apr 2026';
+  if (!t || !t.nonBillableCount) return base;
+  const n = t.nonBillableCount;
+  return base + ' \u2022 ' + n + ' model' + (n === 1 ? '' : 's') + ' excluded';
+}
+function _costTitle(t) {
+  if (!t || !t.nonBillableCount) return '';
+  return 'Excluded from cost (not in PRICING table): ' +
+    (t.nonBillableModels || []).slice(0, 5).join(', ') +
+    (t.nonBillableModels.length > 5 ? ', ...' : '');
+}
+
 function renderStats(t) {
   const rangeLabel = RANGE_LABELS[selectedRange].toLowerCase();
   const stats = [
@@ -1202,10 +1228,10 @@ function renderStats(t) {
     { label: 'Output Tokens',  value: fmt(t.output),               sub: rangeLabel },
     { label: 'Cache Read',     value: fmt(t.cache_read),           sub: 'from prompt cache' },
     { label: 'Cache Creation', value: fmt(t.cache_creation),       sub: 'writes to prompt cache' },
-    { label: 'Est. Cost',      value: fmtCostBig(t.cost),          sub: 'API pricing, Apr 2026', color: '#4ade80' },
+    { label: 'Est. Cost',      value: fmtCostBig(t.cost),          sub: _costSub(t), color: '#4ade80', title: _costTitle(t) },
   ];
   document.getElementById('stats-row').innerHTML = stats.map(s => `
-    <div class="stat-card">
+    <div class="stat-card" title="${s.title ? esc(s.title) : ''}">
       <div class="label">${s.label}</div>
       <div class="value" style="${s.color ? 'color:' + s.color : ''}">${esc(s.value)}</div>
       ${s.sub ? `<div class="sub">${esc(s.sub)}</div>` : ''}
