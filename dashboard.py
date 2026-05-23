@@ -11,7 +11,7 @@ from urllib.parse import parse_qs, urlparse
 from pathlib import Path
 
 from pricing import PRICING
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date as _date_cls
 
 def _git_short_hash():
     """Return the short commit hash of HEAD, or None if git is unavailable."""
@@ -179,6 +179,100 @@ def get_themes():
         except Exception:
             pass
     return list(themes.values())
+
+
+
+def _session_active_minutes(timestamps, gap_threshold_min=5):
+    """Sum of gaps (in minutes) between consecutive turn timestamps where
+    gap < gap_threshold_min. Gaps >= threshold are treated as breaks and
+    excluded. Single-turn sessions yield 0.
+
+    `timestamps` is an iterable of ISO-8601 strings (UTC) for one session's
+    turns. They do not have to be sorted; the helper sorts a copy.
+    """
+    if not timestamps:
+        return 0.0
+    parsed = []
+    for ts in timestamps:
+        if not ts:
+            continue
+        try:
+            parsed.append(datetime.fromisoformat(ts.replace("Z", "+00:00")))
+        except Exception:
+            continue
+    if len(parsed) < 2:
+        return 0.0
+    parsed.sort()
+    threshold = gap_threshold_min * 60.0
+    total = 0.0
+    for a, b in zip(parsed, parsed[1:]):
+        gap = (b - a).total_seconds()
+        if 0 <= gap < threshold:
+            total += gap
+    return round(total / 60.0, 2)
+
+
+def _time_on_task(conn, date=None, gap_threshold_min=5, days=30):
+    """Return per-day active minutes for the trailing `days` days ending on
+    `date` (default: today).
+
+    Active minutes for a day = sum of inter-turn gaps within each session that
+    fall on that day, where the gap is strictly less than `gap_threshold_min`.
+    Gaps that span midnight are credited to the day of the earlier timestamp.
+
+    Returns a list of dicts: [{"day": "YYYY-MM-DD", "active_minutes": float}, ...]
+    in chronological order, with every day present (zero-filled).
+    """
+    end_d = date if isinstance(date, _date_cls) else _date_cls.today()
+    start_d = end_d - timedelta(days=days - 1)
+    start_iso = start_d.isoformat()
+    end_iso = end_d.isoformat()
+
+    # Fetch all turns whose date is in the window, grouped by session, ordered
+    # by timestamp. We need every turn (not aggregates) to compute inter-turn
+    # gaps. Limit query by date prefix so we don't scan history.
+    rows = conn.execute(
+        """
+        SELECT session_id, timestamp
+        FROM turns
+        WHERE timestamp IS NOT NULL
+          AND substr(timestamp, 1, 10) BETWEEN ? AND ?
+        ORDER BY session_id, timestamp
+        """,
+        (start_iso, end_iso),
+    ).fetchall()
+
+    per_day = {(start_d + timedelta(days=i)).isoformat(): 0.0 for i in range(days)}
+    threshold = gap_threshold_min * 60.0
+
+    # Walk session by session, summing intra-session gaps to the day of the
+    # earlier timestamp.
+    current_sid = None
+    prev_ts = None
+    for r in rows:
+        sid = r[0] if not hasattr(r, "keys") else r["session_id"]
+        ts  = r[1] if not hasattr(r, "keys") else r["timestamp"]
+        if sid != current_sid:
+            current_sid = sid
+            prev_ts = ts
+            continue
+        try:
+            t1 = datetime.fromisoformat(prev_ts.replace("Z", "+00:00"))
+            t2 = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except Exception:
+            prev_ts = ts
+            continue
+        gap = (t2 - t1).total_seconds()
+        if 0 <= gap < threshold:
+            day_key = prev_ts[:10]
+            if day_key in per_day:
+                per_day[day_key] += gap
+        prev_ts = ts
+
+    return [
+        {"day": d, "active_minutes": round(per_day[d] / 60.0, 2)}
+        for d in sorted(per_day.keys())
+    ]
 
 
 def _cost_concentration(sessions_with_cost, top_n=5):
@@ -403,6 +497,17 @@ def get_dashboard_data(db_path=None):
             ORDER BY last_timestamp DESC
         """).fetchall()
 
+    # Pre-fetch per-session turn timestamps so we can compute active_minutes
+    # (sum of inter-turn gaps under the break threshold) without N round-trips.
+    ts_rows = conn.execute(
+        """SELECT session_id, timestamp FROM turns
+           WHERE timestamp IS NOT NULL
+           ORDER BY session_id, timestamp"""
+    ).fetchall()
+    session_ts = {}
+    for r in ts_rows:
+        session_ts.setdefault(r["session_id"], []).append(r["timestamp"])
+
     sessions_all = []
     for r in session_rows:
         try:
@@ -411,6 +516,7 @@ def get_dashboard_data(db_path=None):
             duration_min = round((t2 - t1).total_seconds() / 60, 1)
         except Exception:
             duration_min = 0
+        active_minutes = _session_active_minutes(session_ts.get(r["session_id"], []))
         sessions_all.append({
             "session_id":      r["session_id"][:8],
             "session_id_full": r["session_id"],
@@ -421,6 +527,7 @@ def get_dashboard_data(db_path=None):
             "last":            (r["last_timestamp"] or "")[:16].replace("T", " "),
             "last_date":     (r["last_timestamp"] or "")[:10],
             "duration_min":  duration_min,
+            "active_minutes": active_minutes,
             "model":         r["model"] or "unknown",
             "turns":         r["turn_count"] or 0,
             "input":         r["total_input_tokens"] or 0,
@@ -451,6 +558,7 @@ def get_dashboard_data(db_path=None):
                   + (r["cw"] or 0) * _p["cache_write"]) / 1_000_000
     plan_recommendation = _plan_comparison(_pmtd)
     dow_hour = _dow_hour_heatmap(conn)
+    time_on_task = _time_on_task(conn)
     _tags_map = _load_tags()
     for s in sessions_all:
         s["tags"] = _tags_map.get(s["session_id"], [])
@@ -462,10 +570,11 @@ def get_dashboard_data(db_path=None):
         "daily_by_model":  daily_by_model,
         "hourly_by_model": hourly_by_model,
         "sessions_all":    sessions_all,
+        "time_on_task":    time_on_task,
         "plan_recommendation": plan_recommendation,
         "dow_hour":        dow_hour,
         "streak":          streak,
-        "generated_at":       datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "generated_at":    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
 
@@ -1149,6 +1258,31 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <div class="stats-row" id="stats-row"></div>
     <div id="pareto-card" style="display:none; margin: -8px 0 16px 0; padding: 10px 14px; background: rgba(217,119,87,0.08); border-radius: 8px; font-size: 12px; color: var(--text);"></div>
     <div id="plan-card" style="display:none; margin:0 0 16px 0; padding:10px 14px; background:rgba(74,222,128,0.08); border-radius:8px; font-size:12px; color:var(--text);"></div>
+    <div class="chart-card" id="time-on-task-card" style="margin-bottom: 16px;">
+      <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:16px; flex-wrap:wrap;">
+        <div>
+          <h2 style="margin-bottom:4px;">Time on Task</h2>
+          <div class="hint" id="tot-sub">Active coding minutes today &mdash; sum of intra-session gaps under 5 minutes</div>
+          <div style="display:flex; align-items:baseline; gap:16px; margin-top:10px;">
+            <div>
+              <div style="font-size:32px; font-weight:600; letter-spacing:-0.4px; color:var(--text);" id="tot-today">&mdash;</div>
+              <div class="muted" style="font-size:11px;">today</div>
+            </div>
+            <div>
+              <div style="font-size:18px; font-weight:500; color:var(--muted);" id="tot-avg">&mdash;</div>
+              <div class="muted" style="font-size:11px;">30d avg</div>
+            </div>
+            <div>
+              <div style="font-size:18px; font-weight:500; color:var(--muted);" id="tot-total">&mdash;</div>
+              <div class="muted" style="font-size:11px;">30d total</div>
+            </div>
+          </div>
+        </div>
+        <div style="flex:1; min-width:200px; max-width:520px; height:80px;">
+          <canvas id="chart-time-on-task"></canvas>
+        </div>
+      </div>
+    </div>
   <div class="charts-grid">
     <div class="chart-card wide">
       <h2 id="daily-chart-title">Daily Token Usage</h2>
@@ -1810,6 +1944,7 @@ function applyFilter() {
   renderPareto(lastFilteredSessions || filteredSessions);
   renderPlanCard();
   renderDowHourHeatmap();
+  renderTimeOnTask();
   lastFilteredSessions = sortSessions(filteredSessions);
   lastByProject = sortProjects(byProject);
   lastByProjectBranch = sortProjectBranch(byProjectBranch);
@@ -2107,6 +2242,64 @@ function renderModelChart(byModel) {
         tooltip: { callbacks: { label: ctx => ` ${ctx.label}: ${fmt(ctx.raw)} tokens` } }
       }
     }
+  });
+}
+
+function renderTimeOnTask() {  // eslint-disable-line no-unused-vars
+  if (!rawData || !rawData.time_on_task) return;
+  const days = rawData.time_on_task;
+  if (!days.length) return;
+  const todayMin = days[days.length - 1].active_minutes;
+  const total = days.reduce((a, d) => a + d.active_minutes, 0);
+  const avg = total / days.length;
+
+  const fmtMin = m => {
+    if (m < 1) return '0m';
+    if (m < 60) return Math.round(m) + 'm';
+    const h = Math.floor(m / 60), mm = Math.round(m % 60);
+    return mm ? h + 'h ' + mm + 'm' : h + 'h';
+  };
+  const todayEl = document.getElementById('tot-today');
+  const avgEl   = document.getElementById('tot-avg');
+  const totEl   = document.getElementById('tot-total');
+  if (todayEl) todayEl.textContent = fmtMin(todayMin);
+  if (avgEl)   avgEl.textContent   = fmtMin(avg);
+  if (totEl)   totEl.textContent   = fmtMin(total);
+
+  const canvas = document.getElementById('chart-time-on-task');
+  if (!canvas || typeof Chart === 'undefined') return;
+  const ctx = canvas.getContext('2d');
+  if (charts.timeOnTask) charts.timeOnTask.destroy();
+  charts.timeOnTask = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: days.map(d => d.day),
+      datasets: [{
+        data: days.map(d => d.active_minutes),
+        borderColor: chartColors().label,
+        backgroundColor: 'rgba(94,106,210,0.18)',
+        fill: true,
+        tension: 0.35,
+        pointRadius: 0,
+        borderWidth: 1.5,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: ctx => fmtMin(ctx.raw) + ' active',
+          },
+        },
+      },
+      scales: {
+        x: { display: false },
+        y: { display: false, beginAtZero: true },
+      },
+    },
   });
 }
 
