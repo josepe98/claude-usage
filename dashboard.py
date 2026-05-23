@@ -537,6 +537,50 @@ def _dow_hour_heatmap(conn):
         grid[d][h]["turns"] += r["turns"] or 0
         grid[d][h]["tokens"] += r["tokens"] or 0
     return grid
+def _cost_per_turn_stats(conn):
+    """Compute per-turn cost distribution: p50/p95/p99/max + 12 log-spaced buckets."""
+    from pricing import get_pricing
+    rows = conn.execute("""
+        SELECT model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens
+        FROM turns
+    """).fetchall()
+    costs = []
+    for r in rows:
+        p = get_pricing(r["model"])
+        if not p:
+            continue
+        c = ((r["input_tokens"] or 0) * p["input"]
+             + (r["output_tokens"] or 0) * p["output"]
+             + (r["cache_read_tokens"] or 0) * p["cache_read"]
+             + (r["cache_creation_tokens"] or 0) * p["cache_write"]) / 1_000_000
+        if c > 0:
+            costs.append(c)
+    if not costs:
+        return None
+    costs.sort()
+    def pct(p): return costs[min(int(len(costs) * p), len(costs) - 1)]
+    # 12 log-spaced buckets from $0.0001 to costs[-1]
+    import math
+    max_c = max(costs[-1], 1e-4)
+    edges = [10 ** (math.log10(1e-4) + i * (math.log10(max_c) - math.log10(1e-4)) / 12) for i in range(13)]
+    buckets = [0] * 12
+    for c in costs:
+        for i in range(12):
+            if c <= edges[i + 1]:
+                buckets[i] += 1
+                break
+        else:
+            buckets[-1] += 1
+    return {
+        "n": len(costs),
+        "p50": round(pct(0.5), 4),
+        "p95": round(pct(0.95), 4),
+        "p99": round(pct(0.99), 4),
+        "max": round(costs[-1], 4),
+        "mean": round(sum(costs) / len(costs), 4),
+        "buckets": buckets,
+        "edges": [round(e, 5) for e in edges],
+    }
 
 
 def get_dashboard_data(db_path=DB_PATH):
@@ -711,6 +755,7 @@ def get_dashboard_data(db_path=DB_PATH):
     for s in sessions_all:
         s["tags"] = _tags_map.get(s["session_id"], [])
     dow_hour = _dow_hour_heatmap(conn)
+    cost_histogram = _cost_per_turn_stats(conn)
     conn.close()
 
     return {
@@ -724,6 +769,7 @@ def get_dashboard_data(db_path=DB_PATH):
         "budget":          budget_status_data,
         "anomaly":         anomaly,
         "dow_hour":        dow_hour,
+        "cost_histogram":  cost_histogram,
         "generated_at":    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
@@ -1359,6 +1405,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       </div>
       <div class="chart-wrap"><canvas id="chart-hourly"></canvas></div>
     </div>
+    <div class="chart-card">
+      <h2>Cost per Turn Distribution</h2>
+      <div id="histo-stats" style="font-size: 11px; color: var(--muted); margin-bottom: 8px;"></div>
+      <div class="chart-wrap"><canvas id="chart-histo"></canvas></div>
+    </div>
+
     <div class="chart-card">
       <h2>By Model</h2>
       <div class="chart-wrap"><canvas id="chart-model"></canvas></div>
@@ -2079,6 +2131,7 @@ function applyFilter() {
   renderToolsChart(filteredTools);
   renderAnomalyBanner();
   renderDowHourHeatmap();
+  renderHistogram();
   lastFilteredSessions = sortSessions(filteredSessions);
   lastByProject = sortProjects(byProject);
   lastByProjectBranch = sortProjectBranch(byProjectBranch);
@@ -2627,6 +2680,34 @@ function renderDowHourHeatmap() {  // eslint-disable-line no-unused-vars
     }
   }
   el.innerHTML = cells.join("");
+let histoChart = null;
+function renderHistogram() {  // eslint-disable-line no-unused-vars
+  const h = rawData && rawData.cost_histogram;
+  const stats = document.getElementById("histo-stats");
+  const ctx = document.getElementById("chart-histo");
+  if (!h || !ctx) {
+    if (stats) stats.textContent = "";
+    return;
+  }
+  stats.textContent =
+    "n=" + h.n.toLocaleString() +
+    " • p50 $" + h.p50 +
+    " • p95 $" + h.p95 +
+    " • p99 $" + h.p99 +
+    " • max $" + h.max;
+  const labels = h.edges.slice(0, -1).map((e, i) =>
+    "$" + e.toFixed(4) + " – $" + h.edges[i + 1].toFixed(4)
+  );
+  if (histoChart) histoChart.destroy();
+  histoChart = new Chart(ctx, {
+    type: "bar",
+    data: { labels: labels, datasets: [{ label: "Turns", data: h.buckets, backgroundColor: "rgba(217,119,87,0.7)" }] },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: { x: { ticks: { font: { size: 9 } } }, y: { beginAtZero: true } },
+    },
+  });
 }
 
 function renderProjectChart(byProject) {
