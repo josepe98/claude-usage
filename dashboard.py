@@ -720,7 +720,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
   tr.session-row { cursor: pointer; }
   tr.session-row.selected td { background: rgba(0,113,227,0.06); }
-  .detail-grid { display: grid; grid-template-columns: 1.2fr 0.8fr; gap: 16px; }
+  .detail-grid { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.8fr); gap: 16px; }
   .detail-card { background: rgba(0,0,0,0.02); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
   .detail-card h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin-bottom: 12px; }
   .detail-meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 16px; }
@@ -730,6 +730,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .pill { border: 1px solid var(--border); border-radius: 999px; padding: 5px 10px; font-size: 12px; color: var(--text); background: rgba(0,0,0,0.02); }
   .detail-table-wrap { max-height: 360px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
   .detail-table-wrap table th { position: sticky; top: 0; background: var(--card); }
+  .detail-table-wrap td, .detail-table-wrap th { white-space: nowrap; }
   .hint { color: var(--muted); font-size: 12px; }
 
   @media (max-width: 768px) {
