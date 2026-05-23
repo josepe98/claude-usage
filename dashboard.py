@@ -9,8 +9,8 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 from pathlib import Path
 
-from pricing import PRICING
-from datetime import datetime
+from pricing import PRICING, get_pricing
+from datetime import datetime, date, timedelta
 
 DB_PATH    = Path.home() / ".claude" / "usage.db"
 THEMES_DIR = Path.home() / ".claude" / "claude-usage" / "themes"
@@ -189,6 +189,60 @@ def _cost_concentration(sessions_with_cost, top_n=5):
     }
 
 
+def _year_calendar(conn, today=None):
+    """Return a list of 365 dicts (oldest day first) covering the trailing
+    365 days ending at ``today`` (UTC date by default). Each dict has the
+    shape ``{"date": "YYYY-MM-DD", "cost": float, "turns": int}``. Days with
+    no recorded turns are included with ``cost=0`` and ``turns=0`` so the
+    front-end can draw a contiguous 53x7 grid without gaps.
+
+    Cost is calculated server-side per (day, model) using the canonical
+    PRICING table from ``pricing.py``; turns from non-billable models still
+    count toward the day's turn total but contribute 0 cost — matching the
+    behaviour of the JS ``calcCost`` helper.
+    """
+    today = today or date.today()
+    start = today - timedelta(days=364)  # inclusive window of 365 days
+    start_iso = start.isoformat()
+
+    rows = conn.execute("""
+        SELECT
+            substr(timestamp, 1, 10)                  as day,
+            COALESCE(NULLIF(model, ''), 'unknown')    as model,
+            SUM(input_tokens)          as input,
+            SUM(output_tokens)         as output,
+            SUM(cache_read_tokens)     as cache_read,
+            SUM(cache_creation_tokens) as cache_creation,
+            COUNT(*)                   as turns
+        FROM turns
+        WHERE substr(timestamp, 1, 10) >= ?
+        GROUP BY day, model
+    """, (start_iso,)).fetchall()
+
+    by_day = {}
+    for r in rows:
+        day = r["day"]
+        if not day:
+            continue
+        bucket = by_day.setdefault(day, {"cost": 0.0, "turns": 0})
+        bucket["turns"] += r["turns"] or 0
+        p = get_pricing(r["model"])
+        if p:
+            bucket["cost"] += (
+                (r["input"] or 0)          * p["input"]       / 1e6 +
+                (r["output"] or 0)         * p["output"]      / 1e6 +
+                (r["cache_read"] or 0)     * p["cache_read"]  / 1e6 +
+                (r["cache_creation"] or 0) * p["cache_write"] / 1e6
+            )
+
+    out = []
+    for i in range(365):
+        d = (start + timedelta(days=i)).isoformat()
+        b = by_day.get(d, {"cost": 0.0, "turns": 0})
+        out.append({"date": d, "cost": round(b["cost"], 6), "turns": b["turns"]})
+    return out
+
+
 def get_dashboard_data(db_path=DB_PATH):
     if not db_path.exists():
         return {"error": "Database not found. Run: python cli.py scan"}
@@ -308,6 +362,7 @@ def get_dashboard_data(db_path=DB_PATH):
             "cache_creation": r["total_cache_creation"] or 0,
         })
 
+    year_calendar = _year_calendar(conn)
     conn.close()
 
     return {
@@ -315,6 +370,7 @@ def get_dashboard_data(db_path=DB_PATH):
         "daily_by_model":  daily_by_model,
         "hourly_by_model": hourly_by_model,
         "sessions_all":    sessions_all,
+        "year_calendar":   year_calendar,
         "generated_at":    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
@@ -746,6 +802,15 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .footer-content a { color: var(--accent); text-decoration: none; }
   .footer-content a:hover { text-decoration: underline; }
 
+  /* Year calendar heatmap (GitHub-style contribution grid) */
+  .yc-wrap { overflow-x: auto; padding: 4px 2px 8px; }
+  .yc-grid { display: grid; grid-template-columns: repeat(53, 12px); grid-template-rows: repeat(7, 12px); grid-auto-flow: column; gap: 3px; }
+  .yc-cell { width: 12px; height: 12px; border-radius: 2px; background: var(--chart-grid); }
+  .yc-cell.empty { background: transparent; }
+  .yc-cell:hover { outline: 1px solid var(--accent); }
+  .yc-legend { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); margin-top: 8px; }
+  .yc-legend-swatch { width: 12px; height: 12px; border-radius: 2px; }
+
   tr.session-row { cursor: pointer; }
   tr.session-row.selected td { background: rgba(0,113,227,0.06); }
   .detail-grid { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.8fr); gap: 16px; }
@@ -822,6 +887,24 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <div class="chart-card wide">
       <h2 id="daily-chart-title">Daily Token Usage</h2>
       <div class="chart-wrap tall"><canvas id="chart-daily"></canvas></div>
+    </div>
+    <div class="chart-card wide">
+      <div class="chart-header">
+        <h2>Activity (last 365 days)</h2>
+        <div class="chart-header-right">
+          <span class="chart-day-count" id="year-calendar-total"></span>
+        </div>
+      </div>
+      <div class="yc-wrap"><div id="year-calendar" class="yc-grid"></div></div>
+      <div class="yc-legend">
+        <span>Less</span>
+        <span class="yc-legend-swatch" style="background:var(--chart-grid)"></span>
+        <span class="yc-legend-swatch" id="yc-leg-1"></span>
+        <span class="yc-legend-swatch" id="yc-leg-2"></span>
+        <span class="yc-legend-swatch" id="yc-leg-3"></span>
+        <span class="yc-legend-swatch" id="yc-leg-4"></span>
+        <span>More</span>
+      </div>
     </div>
     <div class="chart-card wide">
       <div class="chart-header">
@@ -1416,6 +1499,9 @@ function applyFilter() {
 
   renderStats(totals, prevTotals);
   renderDailyChart(daily);
+  // Year calendar deliberately ignores the active range — always shows the
+  // trailing 365 days regardless of the Models/Range filter selection.
+  renderYearCalendar(rawData.year_calendar || []);
   renderHourlyChart(hourlyAgg);
   renderModelChart(byModel);
   renderProjectChart(byProject);
@@ -1574,6 +1660,76 @@ function renderStats(t, prev) {
       ${s.sub ? `<div class="sub">${esc(s.sub)}</div>` : ''}
     </div>
   `).join('');
+}
+
+// ── Year calendar (GitHub-style heatmap) ──────────────────────────────────
+// Always renders the trailing 365 days regardless of range/model filters —
+// the value is the "year view" itself; mixing in filters would defeat it.
+function renderYearCalendar(rows) {
+  const container = document.getElementById('year-calendar');
+  if (!container || !rows || !rows.length) {
+    if (container) container.innerHTML = '';
+    return;
+  }
+  const maxCost = rows.reduce((m, r) => r.cost > m ? r.cost : m, 0);
+  const totalCost = rows.reduce((s, r) => s + (r.cost || 0), 0);
+
+  // Layout: 53 columns x 7 rows, oldest-first. We pad the first column so
+  // each row corresponds to a weekday (Sun at the top, matching GitHub).
+  // Cells before the first day stay invisible.
+  const firstDate = new Date(rows[0].date + 'T00:00:00Z');
+  const firstWeekday = firstDate.getUTCDay(); // 0=Sun..6=Sat
+
+  // Build a flat array of cells in column-major order (top-to-bottom, then
+  // left-to-right) — the CSS grid uses grid-auto-flow: column to match.
+  const cells = [];
+  for (let i = 0; i < firstWeekday; i++) cells.push({ empty: true });
+  for (const r of rows) cells.push(r);
+  while (cells.length < 53 * 7) cells.push({ empty: true });
+
+  const accent = (getComputedStyle(document.documentElement)
+                   .getPropertyValue('--accent') || '#0071e3').trim();
+
+  function cellColor(hex, alpha) {
+    // Accept rgb(...) / rgba(...) / #rrggbb / #rgb forms.
+    const trimmed = hex.trim();
+    if (trimmed.startsWith('rgb')) {
+      const nums = trimmed.match(/[\d.]+/g) || [];
+      const [r, g, b] = nums.map(Number);
+      return `rgba(${r|0}, ${g|0}, ${b|0}, ${alpha})`;
+    }
+    let h = trimmed.replace('#', '');
+    if (h.length === 3) h = h.split('').map(c => c + c).join('');
+    const r = parseInt(h.slice(0, 2), 16);
+    const g = parseInt(h.slice(2, 4), 16);
+    const b = parseInt(h.slice(4, 6), 16);
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+  }
+
+  function intensityColor(cost) {
+    if (!cost || maxCost <= 0) return '';
+    const t = Math.min(1, cost / maxCost);
+    // 4 discrete buckets keep the gradient legible.
+    const bucket = t >= 0.75 ? 1.0 : t >= 0.5 ? 0.75 : t >= 0.25 ? 0.5 : 0.25;
+    return cellColor(accent, bucket);
+  }
+
+  container.innerHTML = cells.map(c => {
+    if (c.empty) return '<div class="yc-cell empty"></div>';
+    const color = intensityColor(c.cost);
+    const style = color ? ` style="background:${color}"` : '';
+    const title = `${c.date} — ${fmtCost(c.cost)} — ${c.turns} turn${c.turns === 1 ? '' : 's'}`;
+    return `<div class="yc-cell"${style} title="${esc(title)}"></div>`;
+  }).join('');
+
+  // Legend swatches use the same 4 intensity buckets.
+  ['1','2','3','4'].forEach((n, i) => {
+    const el = document.getElementById('yc-leg-' + n);
+    if (el) el.style.background = cellColor(accent, 0.25 * (i + 1));
+  });
+
+  const totalEl = document.getElementById('year-calendar-total');
+  if (totalEl) totalEl.textContent = fmtCostBig(totalCost) + ' over 365 days';
 }
 
 // Bucket rows into 24 hours (display-TZ), summing turns + output, and count
