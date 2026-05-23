@@ -1127,6 +1127,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <div class="meta" id="meta">Loading...</div>
     <button class="link-btn" onclick="_resetPrefs()" title="Clear saved range / model / theme preferences and reload">Reset prefs</button>
       <button id="rescan-btn" onclick="triggerRescan()" title="Rebuild the database from scratch by re-scanning all JSONL files. Use if data looks stale or costs seem wrong.">&#x21bb; Rescan</button>
+    <div id="live-widget" style="display:none; padding:6px 10px; margin-right:10px; background:rgba(34,197,94,0.12); color:#22c55e; border-radius:6px; font-size:11px; font-weight:600; cursor:default;" title=""></div>
+    <button id="rescan-btn" onclick="triggerRescan()" title="Rebuild the database from scratch by re-scanning all JSONL files. Use if data looks stale or costs seem wrong.">&#x21bb; Rescan</button>
     <button class="appearance-btn" onclick="window.open('/themes','_blank')">Appearance</button>
   </div>
 </header>
@@ -2696,6 +2698,7 @@ async function triggerRescan() {
 })();
 
 loadData();
+    await loadData(); startLivePolling();
   } catch(e) {
     btn.textContent = '\u21bb Rescan (error)';
     console.error(e);
@@ -2704,7 +2707,38 @@ loadData();
 }
 
 // ── Data loading ───────────────────────────────────────────────────────────
-async function loadData() {
+async 
+let _liveTimer = null;
+function startLivePolling() {
+  function tick() {
+    fetch('/api/live').then(r => r.json()).then(d => {
+      const el = document.getElementById('live-widget');
+      if (!el) return;
+      const n = (d.active || []).length;
+      if (n === 0) {
+        el.style.display = 'none';
+        // Slow down to normal cadence
+        if (window._refreshSeconds !== 30) window._refreshSeconds = 30;
+      } else {
+        el.style.display = '';
+        // Tighten the auto-refresh cadence while something is live
+        if (window._refreshSeconds !== 10) window._refreshSeconds = 10;
+        const sample = d.active[0];
+        el.textContent = '\u25c9 LIVE \u2014 ' + n + ' session' + (n === 1 ? '' : 's')
+          + ' \u2022 $' + (sample.cost || 0).toFixed(2);
+        // Tooltip with all active sessions
+        el.title = (d.active || [])
+          .map(s => `${s.session_id} (${s.project}) ${s.turns} turns, $${(s.cost || 0).toFixed(2)} — ${s.seconds_ago}s ago`)
+          .join('\n');
+      }
+    }).catch(() => {});
+  }
+  if (_liveTimer) clearInterval(_liveTimer);
+  tick();
+  _liveTimer = setInterval(tick, 10000);  // probe every 10s — cheap
+}
+
+function loadData() {
   try {
     const resp = await fetch('/api/data');
     const d = await resp.json();
@@ -2859,6 +2893,119 @@ def _export_csv(kind, db_path=None):
         w.writerow(["error"])
         w.writerow([f"unknown export type: {kind}"])
     return out.getvalue()
+def _active_sessions(window_seconds=300, projects_dirs=None,
+                     include_cowork=True, db_path=None):
+    """Return sessions whose JSONL transcript was modified within the last
+    `window_seconds`. Walks the same dirs as scanner.scan() but only stats
+    files; no JSONL parsing. Returns [{session_id, project_name, model,
+    last_modified, turns, input, output, cost}, ...]
+
+    Args are kwargs-only so tests can pass hermetic fixtures."""
+    import scanner
+    from pricing import calc_cost
+    import time as _time
+
+    db = db_path or DB_PATH
+    dirs = projects_dirs if projects_dirs is not None else scanner.DEFAULT_PROJECTS_DIRS
+
+    now = _time.time()
+    paths = []
+    for d in dirs:
+        if not d.exists():
+            continue
+        for p in d.rglob("*.jsonl"):
+            try:
+                m = p.stat().st_mtime
+            except OSError:
+                continue
+            if now - m <= window_seconds:
+                paths.append((p, m))
+    if include_cowork:
+        try:
+            import cowork
+            cowork_dir = cowork.cowork_sessions_dir()
+            if cowork_dir and cowork_dir.exists():
+                for p in cowork_dir.rglob("audit.jsonl"):
+                    try:
+                        m = p.stat().st_mtime
+                    except OSError:
+                        continue
+                    if now - m <= window_seconds:
+                        paths.append((p, m))
+        except Exception:  # noqa: BLE001 — cowork is optional
+            pass
+
+    if not paths or not db.exists():
+        return []
+
+    # Look up DB stats for the sessions whose files are active. The session
+    # id is the JSONL filename stem for Claude Code; for Cowork it's
+    # encoded in the parent dir name as "local_<sid>".
+    candidate_ids = set()
+    for p, _ in paths:
+        if p.name == "audit.jsonl":
+            parent = p.parent.name
+            if parent.startswith("local_"):
+                candidate_ids.add(parent[len("local_"):])
+        else:
+            candidate_ids.add(p.stem)
+
+    if not candidate_ids:
+        return []
+
+    placeholders = ",".join("?" * len(candidate_ids))
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(f"""
+        SELECT session_id, project_name, model, turn_count,
+               total_input_tokens, total_output_tokens,
+               total_cache_read, total_cache_creation, last_timestamp
+        FROM sessions
+        WHERE session_id IN ({placeholders})
+           OR substr(session_id, 1, 36) IN ({placeholders})
+    """, (*candidate_ids, *candidate_ids)).fetchall()
+    conn.close()
+
+    # Index by session id for lookup; merge with mtime so we can sort
+    sessions_by_id = {r["session_id"]: dict(r) for r in rows}
+    out = []
+    seen = set()
+    for p, m in paths:
+        sid = (
+            p.parent.name[len("local_"):] if p.name == "audit.jsonl" else p.stem
+        )
+        if sid in seen:
+            continue
+        seen.add(sid)
+        s = sessions_by_id.get(sid) or {}
+        if not s:
+            # Match by 36-char prefix in case it was hashed differently
+            for full_sid, candidate in sessions_by_id.items():
+                if full_sid.startswith(sid[:36]):
+                    s = candidate
+                    break
+        cost = 0.0
+        if s.get("model"):
+            cost = calc_cost(
+                s["model"],
+                s.get("total_input_tokens", 0),
+                s.get("total_output_tokens", 0),
+                s.get("total_cache_read", 0),
+                s.get("total_cache_creation", 0),
+            )
+        out.append({
+            "session_id":   sid[:8],
+            "project":      s.get("project_name") or "unknown",
+            "model":        s.get("model") or "unknown",
+            "turns":        s.get("turn_count") or 0,
+            "input":        s.get("total_input_tokens") or 0,
+            "output":       s.get("total_output_tokens") or 0,
+            "cost":         round(cost, 4),
+            "last_modified": int(m),
+            "seconds_ago":   int(now - m),
+        })
+    # Most recently active first
+    return sorted(out, key=lambda x: x["seconds_ago"])
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
@@ -2932,6 +3079,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(csv_body)))
             self.end_headers()
             self.wfile.write(csv_body)
+        elif path == "/api/live":
+            data = {"active": _active_sessions()}
+            body = json.dumps(data).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
         elif path == "/api/data":
             data = get_dashboard_data()
             body = json.dumps(data).encode("utf-8")
