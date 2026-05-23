@@ -10,6 +10,7 @@ Commands:
 
 import os
 import sys
+import json
 import sqlite3
 from pathlib import Path
 from datetime import datetime, date, timedelta
@@ -271,6 +272,28 @@ def cmd_forecast():
     print(f"  Projected total   ${f['projected_month_end']:>8.2f}  (month-end at current pace)")
     print()
     conn.close()
+def cmd_export(fmt="json", kind="daily", out=None):
+    """Dump usage data for downstream tooling.
+
+    fmt: 'json' (everything) or 'csv' (one of: daily, sessions, projects)
+    out: optional file path; defaults to stdout
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from dashboard import get_dashboard_data, _export_raw_turns, _export_csv
+    if fmt == "json":
+        data = get_dashboard_data()
+        data["turns"] = _export_raw_turns()
+        body = json.dumps(data, indent=2)
+    elif fmt == "csv":
+        body = _export_csv(kind)
+    else:
+        print(f"Unknown format: {fmt}. Use json or csv.")
+        return
+    if out:
+        Path(out).write_text(body)
+        print(f"Wrote {len(body)} bytes to {out}")
+    else:
+        print(body)
 
 
 def cmd_stats():
@@ -761,6 +784,7 @@ COMMANDS = {
     "stats": cmd_stats,
     "tool-usage": cmd_tool_usage,
     "forecast": cmd_forecast,
+    "export": cmd_export,
     "dashboard": cmd_dashboard,
     "theme": cmd_theme,
     "completions": cmd_completions,
@@ -797,5 +821,11 @@ if __name__ == "__main__":
         cmd_completions(shell=rest[0] if rest else None)
     elif command == "tool-usage":
         cmd_tool_usage(range_days=parse_named_arg(rest, "--range"))
+    elif command == "export":
+        cmd_export(
+            fmt=parse_named_arg(rest, "--format") or "json",
+            kind=parse_named_arg(rest, "--type") or "daily",
+            out=parse_named_arg(rest, "--out"),
+        )
     else:
         COMMANDS[command]()
