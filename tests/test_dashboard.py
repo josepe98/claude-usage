@@ -293,6 +293,15 @@ class TestHTMLTemplate(unittest.TestCase):
     def test_template_has_chart_js(self):
         self.assertIn("chart.js", HTML_TEMPLATE.lower())
 
+    def test_chartjs_script_has_sri_hash(self):
+        """Subresource Integrity hash + crossorigin must be present so a
+        compromised CDN can't ship arbitrary JS to the dashboard."""
+        self.assertRegex(
+            HTML_TEMPLATE,
+            r'chart\.umd\.min\.js[^>]*integrity="sha384-[A-Za-z0-9+/=]+"',
+        )
+        self.assertIn('crossorigin="anonymous"', HTML_TEMPLATE)
+
     def test_template_has_substring_matching(self):
         """Verify getPricing falls back to substring match for unknown models."""
         self.assertIn("m.includes('opus')", HTML_TEMPLATE)
