@@ -54,3 +54,55 @@ def calc_cost(model, inp, out, cache_read, cache_creation):
         + (cache_read or 0)   * p["cache_read"]  / 1_000_000
         + (cache_creation or 0) * p["cache_write"] / 1_000_000
     )
+
+
+# ── Time-keyed pricing history ────────────────────────────────────────────
+# Newest first. When Anthropic changes a rate, add a new entry on top with the
+# effective date; older entries stay valid for rows whose timestamp predates
+# the change.
+#
+# Each entry's `pricing` may be a *partial* dict (only the models that changed).
+# The lookup falls back to the next-most-recent entry, then to the current
+# PRICING above, then to the keyword-fallback rules in get_pricing().
+
+PRICING_HISTORY = [
+    # Example: {"effective": "2026-04-01", "pricing": {"claude-opus-4-7": {...}}},
+    # Today's PRICING is the implicit head — no need to duplicate.
+]
+
+
+def get_pricing_at(model, ts):
+    """Look up rates for `model` that were in effect at timestamp `ts`.
+    `ts` may be a string (ISO 8601), date, or datetime. Falls back to the
+    current PRICING when the timestamp is on or after the latest known
+    effective date, or when no history is configured."""
+    if not ts or not PRICING_HISTORY:
+        return get_pricing(model)
+    # Normalise to a YYYY-MM-DD string for comparison; sort order is lexicographic.
+    if hasattr(ts, "strftime"):
+        day = ts.strftime("%Y-%m-%d")
+    else:
+        day = str(ts)[:10]
+    # PRICING_HISTORY is newest-first; iterate to find the first entry
+    # whose effective date <= the row's day. Skip entries with no relevant
+    # model.
+    for entry in PRICING_HISTORY:
+        if day >= entry["effective"]:
+            p = entry["pricing"].get(model)
+            if p is not None:
+                return p
+            # Model not in this snapshot — keep walking the history.
+    return get_pricing(model)
+
+
+def calc_cost_at(model, inp, out, cache_read, cache_creation, ts):
+    """Like calc_cost(), but uses pricing in effect at `ts`."""
+    p = get_pricing_at(model, ts)
+    if p is None:
+        return 0.0
+    return (
+        (inp or 0)            * p["input"]       / 1_000_000
+        + (out or 0)          * p["output"]      / 1_000_000
+        + (cache_read or 0)   * p["cache_read"]  / 1_000_000
+        + (cache_creation or 0) * p["cache_write"] / 1_000_000
+    )
