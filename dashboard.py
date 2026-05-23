@@ -166,6 +166,29 @@ def get_themes():
     return list(themes.values())
 
 
+
+def _cost_concentration(sessions_with_cost, top_n=5):
+    """Compute Pareto-style concentration: top-N sessions' cost as % of total."""
+    if not sessions_with_cost:
+        return None
+    total = sum(s["cost"] for s in sessions_with_cost)
+    if total <= 0:
+        return None
+    ranked = sorted(sessions_with_cost, key=lambda s: -s["cost"])[:top_n]
+    top_cost = sum(s["cost"] for s in ranked)
+    return {
+        "top_n": top_n,
+        "top_cost": round(top_cost, 2),
+        "total_cost": round(total, 2),
+        "pct": round(top_cost / total * 100, 1),
+        "top_sessions": [
+            {"session_id": s["session_id"], "project": s.get("project", ""),
+             "model": s.get("model", ""), "cost": round(s["cost"], 2)}
+            for s in ranked
+        ],
+    }
+
+
 def get_dashboard_data(db_path=DB_PATH):
     if not db_path.exists():
         return {"error": "Database not found. Run: python cli.py scan"}
@@ -652,6 +675,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
 <div class="container">
   <div class="stats-row" id="stats-row"></div>
+    <div id="pareto-card" style="display:none; margin: -8px 0 16px 0; padding: 10px 14px; background: rgba(217,119,87,0.08); border-radius: 8px; font-size: 12px; color: var(--text);"></div>
   <div class="charts-grid">
     <div class="chart-card wide">
       <h2 id="daily-chart-title">Daily Token Usage</h2>
@@ -1183,6 +1207,7 @@ function applyFilter() {
   renderHourlyChart(hourlyAgg);
   renderModelChart(byModel);
   renderProjectChart(byProject);
+  renderPareto(lastFilteredSessions || filteredSessions);
   lastFilteredSessions = sortSessions(filteredSessions);
   lastByProject = sortProjects(byProject);
   lastByProjectBranch = sortProjectBranch(byProjectBranch);
@@ -1354,6 +1379,26 @@ function renderModelChart(byModel) {
       }
     }
   });
+}
+
+function renderPareto(filteredSessions) {  // eslint-disable-line no-unused-vars
+  const el = document.getElementById("pareto-card");
+  if (!el) return;
+  if (!filteredSessions || !filteredSessions.length) {
+    el.style.display = "none";
+    return;
+  }
+  const withCost = filteredSessions.map(s => Object.assign({}, s, {
+    cost: calcCost(s.model, s.input, s.output, s.cache_read, s.cache_creation),
+  })).filter(s => s.cost > 0);
+  if (!withCost.length) { el.style.display = "none"; return; }
+  const total = withCost.reduce((a, s) => a + s.cost, 0);
+  const ranked = withCost.slice().sort((a, b) => b.cost - a.cost).slice(0, 5);
+  const top = ranked.reduce((a, s) => a + s.cost, 0);
+  const pct = (top / total * 100).toFixed(0);
+  el.style.display = "";
+  const names = ranked.map(s => \`\${s.project} (\${s.session_id})\`).join(", ");
+  el.innerHTML = \`<strong>Cost concentration:</strong> top 5 sessions account for <strong>\${pct}%</strong> of spend in the current range. <span style="color:var(--muted)">(\${names})</span>\`;
 }
 
 function renderProjectChart(byProject) {
