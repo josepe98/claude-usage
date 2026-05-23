@@ -166,6 +166,39 @@ def get_themes():
     return list(themes.values())
 
 
+
+# Subscription plan pricing (USD/month). Anthropic's published numbers, May 2026.
+PLANS = {
+    "Free":       {"price": 0,    "included": "~ $5/mo equivalent"},
+    "Pro":        {"price": 20,   "included": "~ $100/mo equivalent"},
+    "Max-5x":     {"price": 100,  "included": "~ $500/mo equivalent"},
+    "Max-20x":    {"price": 200,  "included": "~ $1000/mo equivalent"},
+}
+
+
+def _plan_comparison(month_to_date_usd):
+    """Given API-equivalent spend so far this month, surface which plan would
+    have been cheapest. Heuristic — these mappings are approximate (Pro caps
+    are usage-based not strict)."""
+    rec = None
+    for name, p in PLANS.items():
+        if p["price"] == 0:
+            continue
+        # Pick the cheapest plan whose included usage exceeds month-to-date.
+        # We approximate "included" as 5x the price (Pro: $20 -> $100 worth,
+        # Max-5x: $100 -> $500). Matches Anthropic's public marketing copy.
+        included = p["price"] * 5
+        if month_to_date_usd <= included:
+            rec = name
+            break
+    rec = rec or "Max-20x"
+    return {
+        "month_to_date": round(month_to_date_usd, 2),
+        "recommended": rec,
+        "plans": PLANS,
+    }
+
+
 def get_dashboard_data(db_path=DB_PATH):
     if not db_path.exists():
         return {"error": "Database not found. Run: python cli.py scan"}
@@ -278,6 +311,27 @@ def get_dashboard_data(db_path=DB_PATH):
             "cache_creation": r["total_cache_creation"] or 0,
         })
 
+    # Plan comparison — compute month-to-date USD inline.
+    from pricing import get_pricing as _gp_plan
+    from datetime import date as _dt_plan
+    _mp = _dt_plan.today().strftime("%Y-%m")
+    _pmtd = 0.0
+    for r in conn.execute("""
+        SELECT model,
+               SUM(input_tokens) as inp, SUM(output_tokens) as out,
+               SUM(cache_read_tokens) as cr, SUM(cache_creation_tokens) as cw
+        FROM turns
+        WHERE substr(timestamp, 1, 7) = ?
+        GROUP BY model
+    """, (_mp,)).fetchall():
+        _p = _gp_plan(r["model"])
+        if not _p:
+            continue
+        _pmtd += ((r["inp"] or 0) * _p["input"]
+                  + (r["out"] or 0) * _p["output"]
+                  + (r["cr"] or 0) * _p["cache_read"]
+                  + (r["cw"] or 0) * _p["cache_write"]) / 1_000_000
+    plan_recommendation = _plan_comparison(_pmtd)
     conn.close()
 
     return {
@@ -285,7 +339,8 @@ def get_dashboard_data(db_path=DB_PATH):
         "daily_by_model":  daily_by_model,
         "hourly_by_model": hourly_by_model,
         "sessions_all":    sessions_all,
-        "generated_at":    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "plan_recommendation": plan_recommendation,
+        "generated_at":       datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
 
@@ -652,6 +707,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
 <div class="container">
   <div class="stats-row" id="stats-row"></div>
+    <div id="plan-card" style="display:none; margin:0 0 16px 0; padding:10px 14px; background:rgba(74,222,128,0.08); border-radius:8px; font-size:12px; color:var(--text);"></div>
   <div class="charts-grid">
     <div class="chart-card wide">
       <h2 id="daily-chart-title">Daily Token Usage</h2>
@@ -1183,6 +1239,7 @@ function applyFilter() {
   renderHourlyChart(hourlyAgg);
   renderModelChart(byModel);
   renderProjectChart(byProject);
+  renderPlanCard();
   lastFilteredSessions = sortSessions(filteredSessions);
   lastByProject = sortProjects(byProject);
   lastByProjectBranch = sortProjectBranch(byProjectBranch);
@@ -1354,6 +1411,19 @@ function renderModelChart(byModel) {
       }
     }
   });
+}
+
+function renderPlanCard() {  // eslint-disable-line no-unused-vars
+  const r = rawData && rawData.plan_recommendation;
+  const el = document.getElementById("plan-card");
+  if (!el || !r) return;
+  if (!r.month_to_date || r.month_to_date < 1) {
+    el.style.display = "none";
+    return;
+  }
+  const p = r.plans[r.recommended];
+  el.style.display = "";
+  el.innerHTML = \`<strong>Plan recommendation:</strong> at $\${r.month_to_date.toFixed(2)} API-equivalent this month, <strong>\${r.recommended}</strong> ($\${p.price}/mo, includes \${p.included}) would be the cheapest subscription. <span style="color:var(--muted)">Compare: \${Object.entries(r.plans).map(([n, pp]) => n + " $" + pp.price).join(" • ")}</span>\`;
 }
 
 function renderProjectChart(byProject) {
