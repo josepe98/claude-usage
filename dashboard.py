@@ -68,6 +68,8 @@ def _save_project_aliases(aliases, path=None):
     return cleaned
 from pricing import PRICING
 from datetime import datetime, timedelta, date
+from pricing import PRICING, calc_cost, get_pricing
+from datetime import datetime
 
 DB_PATH    = Path.home() / ".claude" / "usage.db"
 THEMES_DIR = Path.home() / ".claude" / "claude-usage" / "themes"
@@ -897,6 +899,196 @@ def _compute_streak(conn, today=None):
         streak += 1
         cursor -= timedelta(days=1)
     return streak
+# ── Model downgrade suggestions ──────────────────────────────────────────────
+# Tools that a cheaper model (haiku) can handle just as well as opus/sonnet.
+# Reading files, simple edits, running commands, searching — these don't need
+# the deepest reasoning model. Task (subagent dispatch), WebSearch, WebFetch
+# and any multi-step "think hard" reply turn does.
+_DOWNGRADE_SIMPLE_TOOLS = {
+    "Read", "Edit", "Bash", "Grep", "Glob", "LS",
+    "MultiEdit", "Write", "NotebookRead",
+}
+# Tools whose presence vetoes a downgrade outright — they're signals the
+# session leaned on agentic / web-research capabilities of the larger model.
+_DOWNGRADE_VETO_TOOLS = {
+    "Task", "WebSearch", "WebFetch",
+}
+# Threshold parameters — kept as module-level constants so tests can monkey-patch.
+_DOWNGRADE_SMALL_INPUT_AVG = 5000
+_DOWNGRADE_SMALL_OUTPUT_AVG = 2000
+_DOWNGRADE_CACHE_CREATION_RATIO = 0.20  # cache_creation tokens / total < this
+_DOWNGRADE_SIMPLE_TOOL_RATIO = 0.70     # of identified tool turns
+_DOWNGRADE_MIN_SCORE = 3                # out of 4 signals
+_DOWNGRADE_MIN_TURNS = 5                # ignore tiny one-shot sessions
+_DOWNGRADE_MIN_SAVINGS = 0.01           # don't surface sub-cent savings
+_DOWNGRADE_TOP_N = 20
+
+
+def _is_downgradable_model(model):
+    """True iff model is opus or sonnet (not haiku, not unknown)."""
+    if not model:
+        return False
+    m = model.lower()
+    return ("opus" in m) or ("sonnet" in m)
+
+
+def _suggest_target_model(current_model):
+    """Pick a haiku model from PRICING that matches the family era when
+    possible, falling back to the newest haiku."""
+    # Prefer same generation (e.g. opus-4-7 -> haiku-4-7). The PRICING dict is
+    # ordered newest-first, so iterate it directly.
+    if current_model:
+        # Extract the trailing -X-Y version suffix, if any
+        m = re.search(r"-(\d+-\d+)$", current_model)
+        if m:
+            suffix = m.group(1)
+            candidate = f"claude-haiku-{suffix}"
+            if candidate in PRICING:
+                return candidate
+    # Fallback: newest haiku in the table
+    for key in PRICING:
+        if "haiku" in key:
+            return key
+    return "claude-haiku-4-5"
+
+
+def _downgrade_suggestions(conn):
+    """Find sessions where a cheaper model could plausibly have done the work.
+
+    Heuristic per opus/sonnet session (haiku is never suggested for downgrade):
+      1. avg input < _DOWNGRADE_SMALL_INPUT_AVG AND avg output <
+         _DOWNGRADE_SMALL_OUTPUT_AVG — small per-turn footprint.
+      2. cache_creation / total_tokens < _DOWNGRADE_CACHE_CREATION_RATIO —
+         not a sprawling long-context session.
+      3. Of turns with an identifiable tool, share of "simple" tools
+         (Read/Edit/Bash/Grep/...) >= _DOWNGRADE_SIMPLE_TOOL_RATIO.
+      4. No vetoed tools (Task, WebSearch, WebFetch) anywhere in the session.
+
+    Each satisfied check is one point; sessions scoring >= _DOWNGRADE_MIN_SCORE
+    are flagged. Cost is re-priced against the suggested haiku model, and we
+    return the top _DOWNGRADE_TOP_N by absolute savings.
+    """
+    try:
+        session_rows = conn.execute("""
+            SELECT
+                session_id, model, project_name,
+                total_input_tokens, total_output_tokens,
+                total_cache_read, total_cache_creation, total_cache_1h,
+                turn_count
+            FROM sessions
+            WHERE turn_count >= ?
+        """, (_DOWNGRADE_MIN_TURNS,)).fetchall()
+    except sqlite3.OperationalError:
+        # total_cache_1h column missing on very old DBs
+        session_rows = conn.execute("""
+            SELECT
+                session_id, model, project_name,
+                total_input_tokens, total_output_tokens,
+                total_cache_read, total_cache_creation,
+                0 AS total_cache_1h,
+                turn_count
+            FROM sessions
+            WHERE turn_count >= ?
+        """, (_DOWNGRADE_MIN_TURNS,)).fetchall()
+
+    suggestions = []
+
+    for r in session_rows:
+        model = r["model"] or ""
+        if not _is_downgradable_model(model):
+            continue
+        turns = r["turn_count"] or 0
+        if turns <= 0:
+            continue
+
+        inp = r["total_input_tokens"] or 0
+        out = r["total_output_tokens"] or 0
+        cr = r["total_cache_read"] or 0
+        cc = r["total_cache_creation"] or 0
+        cc1h = r["total_cache_1h"] or 0
+        total_tokens = inp + out + cr + cc + cc1h
+        if total_tokens <= 0:
+            continue
+
+        avg_in = inp / turns
+        avg_out = out / turns
+        cc_ratio = (cc + cc1h) / total_tokens if total_tokens else 0.0
+
+        # Tool distribution — also veto check
+        tool_rows = conn.execute("""
+            SELECT COALESCE(tool_name, '') AS tool, COUNT(*) AS n
+            FROM turns
+            WHERE session_id = ?
+            GROUP BY tool
+        """, (r["session_id"],)).fetchall()
+
+        vetoed = False
+        simple_tool_turns = 0
+        identified_tool_turns = 0
+        for tr in tool_rows:
+            t = tr["tool"]
+            n = tr["n"] or 0
+            if not t:
+                continue  # empty tool means reply / no tool call
+            if t in _DOWNGRADE_VETO_TOOLS:
+                vetoed = True
+                break
+            identified_tool_turns += n
+            if t in _DOWNGRADE_SIMPLE_TOOLS:
+                simple_tool_turns += n
+
+        if vetoed:
+            continue
+
+        simple_ratio = (
+            simple_tool_turns / identified_tool_turns
+            if identified_tool_turns > 0
+            else 1.0  # no tool calls at all = trivially "simple"
+        )
+
+        score = 0
+        if avg_in < _DOWNGRADE_SMALL_INPUT_AVG and avg_out < _DOWNGRADE_SMALL_OUTPUT_AVG:
+            score += 1
+        if cc_ratio < _DOWNGRADE_CACHE_CREATION_RATIO:
+            score += 1
+        if simple_ratio >= _DOWNGRADE_SIMPLE_TOOL_RATIO:
+            score += 1
+        # 4th signal: a session with literally zero tool turns and short
+        # turns is the textbook "chat about syntax" case haiku eats for breakfast.
+        if identified_tool_turns == 0 and avg_in < _DOWNGRADE_SMALL_INPUT_AVG:
+            score += 1
+        elif identified_tool_turns > 0 and not vetoed:
+            # Or, having tool turns at all with no veto is itself a signal
+            # the session was hands-on engineering rather than ideation.
+            score += 1
+
+        if score < _DOWNGRADE_MIN_SCORE:
+            continue
+
+        current_cost = calc_cost(model, inp, out, cr, cc, cache_1h=cc1h)
+        target_model = _suggest_target_model(model)
+        projected_cost = calc_cost(target_model, inp, out, cr, cc, cache_1h=cc1h)
+        savings = current_cost - projected_cost
+        if savings < _DOWNGRADE_MIN_SAVINGS:
+            continue
+
+        suggestions.append({
+            "session_id":      r["session_id"][:8],
+            "session_id_full": r["session_id"],
+            "project":         r["project_name"] or "unknown",
+            "current_model":   model,
+            "suggested_model": target_model,
+            "current_cost":    round(current_cost, 4),
+            "projected_cost":  round(projected_cost, 4),
+            "savings_usd":     round(savings, 4),
+            "score":           score,
+            "turns":           turns,
+            "avg_input":       round(avg_in, 1),
+            "avg_output":      round(avg_out, 1),
+        })
+
+    suggestions.sort(key=lambda s: s["savings_usd"], reverse=True)
+    return suggestions[:_DOWNGRADE_TOP_N]
 
 
 def get_dashboard_data(db_path=DB_PATH):
@@ -1108,6 +1300,10 @@ def get_dashboard_data(db_path=DB_PATH):
     for s in sessions_all:
         haystack = f"{s.get('project', '')} {s.get('branch', '')}"
         s["sensitive_match"] = _pii_check(haystack, _pii_patterns)
+    downgrade_suggestions = _downgrade_suggestions(conn)
+    downgrade_total_savings = round(
+        sum(s["savings_usd"] for s in downgrade_suggestions), 2
+    )
 
     conn.close()
 
@@ -1126,6 +1322,8 @@ def get_dashboard_data(db_path=DB_PATH):
         "project_budgets": project_budgets,
         "subagent_split": subagent_split,
         "streak":          streak,
+        "downgrade_suggestions":   downgrade_suggestions,
+        "downgrade_total_savings": downgrade_total_savings,
         "generated_at":    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "plan_recommendation": plan_recommendation,
         "generated_at":       datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -1736,6 +1934,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <div id="anomaly-banner" style="display:none; padding:10px 14px; margin: 0 0 12px 0; background:rgba(248,113,113,0.12); border-left:3px solid #f87171; border-radius:6px; color:#f87171; font-size:13px;"></div>
     <div class="stats-row" id="stats-row"></div>
     <div id="plan-card" style="display:none; margin:0 0 16px 0; padding:10px 14px; background:rgba(74,222,128,0.08); border-radius:8px; font-size:12px; color:var(--text);"></div>
+    <div id="downgrade-card" style="display:none; margin: -8px 0 16px 0; padding: 10px 14px; background: rgba(74,222,128,0.10); border-radius: 8px; font-size: 12px; color: var(--text);"></div>
   <div class="charts-grid">
     <div class="chart-card wide">
       <h2 id="daily-chart-title">Daily Token Usage</h2>
@@ -2506,6 +2705,7 @@ function applyFilter() {
   renderDowHourHeatmap();
   renderHistogram();
   renderPlanCard();
+  renderDowngradeSuggestions();
   lastFilteredSessions = sortSessions(filteredSessions);
   lastByProject = sortProjects(byProject);
   lastByProjectBranch = sortProjectBranch(byProjectBranch);
@@ -3174,6 +3374,21 @@ function _renderSensitiveBadge(s) {  // eslint-disable-line no-unused-vars
   if (!matches || !matches.length) return "";
   const tip = `Sensitive markers matched: ${matches.join(', ')}`;
   return ` <span class="pii-badge" title="${esc(tip)}" aria-label="${esc(tip)}" style="display:inline-block;margin-left:4px;padding:0 5px;border-radius:6px;font-size:10px;line-height:14px;background:rgba(255,159,10,0.18);color:#b06b00;border:1px solid rgba(255,159,10,0.45);cursor:help;vertical-align:middle;">&#9888;</span>`;
+function renderDowngradeSuggestions() {  // eslint-disable-line no-unused-vars
+  const el = document.getElementById("downgrade-card");
+  if (!el) return;
+  const suggestions = (rawData && rawData.downgrade_suggestions) || [];
+  const totalSavings = (rawData && rawData.downgrade_total_savings) || 0;
+  if (!suggestions.length || totalSavings <= 0) {
+    el.style.display = "none";
+    return;
+  }
+  el.style.display = "";
+  const top = suggestions.slice(0, 3);
+  const names = top.map(s =>
+    `${esc(s.project)} (${esc(s.session_id)} → ${esc(s.suggested_model.replace("claude-", ""))}, save ${fmtCostBig ? fmtCostBig(s.savings_usd) : "$" + s.savings_usd.toFixed(2)})`
+  ).join(", ");
+  el.innerHTML = `<strong>Downgrade hint:</strong> ${suggestions.length} opus/sonnet session${suggestions.length === 1 ? "" : "s"} could likely have used haiku — potential savings <strong>$${totalSavings.toFixed(2)}</strong> across the database. <span style="color:var(--muted)">Top: ${names}</span>`;
 }
 
 function renderProjectChart(byProject) {
