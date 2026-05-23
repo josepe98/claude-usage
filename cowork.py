@@ -129,6 +129,11 @@ def parse_audit_file(filepath):
                         cache_1h = 0
                     cache_5m = cache_creation - cache_1h
                     msg_idx += 1
+                    # parent_tool_use_id on the result event means this whole
+                    # sub-task ran inside a Task() delegation — flag every
+                    # emitted turn so the dashboard can split sub-agent vs
+                    # main-thread spend.
+                    is_subagent = bool(record.get("parent_tool_use_id"))
                     turns.append({
                         "session_id": session_id,
                         "timestamp": timestamp,
@@ -138,7 +143,7 @@ def parse_audit_file(filepath):
                         "cache_read_tokens": int(usage.get("cacheReadInputTokens", 0) or 0),
                         "cache_creation_tokens": cache_5m,
                         "cache_1h_tokens": cache_1h,
-                        "tool_name": None,
+                        "tool_name": "subagent" if is_subagent else None,
                         "cwd": project_name,
                         "message_id": f"cowork-{session_id}-{msg_idx}-{model}",
                     })

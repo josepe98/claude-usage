@@ -306,6 +306,39 @@ def _compute_streak(conn, today=None):
     return streak
 
 
+def _subagent_split(conn):
+    """Return {main: cost, subagent: cost, main_pct} from current PRICING.
+    Uses the convention that turns with tool_name='subagent' are delegated
+    (Cowork Task-spawn); everything else is main-thread."""
+    from pricing import get_pricing
+    rows = conn.execute("""
+        SELECT tool_name, model,
+               SUM(input_tokens) as inp, SUM(output_tokens) as out,
+               SUM(cache_read_tokens) as cr, SUM(cache_creation_tokens) as cw
+        FROM turns
+        GROUP BY tool_name, model
+    """).fetchall()
+    main = 0.0
+    sub = 0.0
+    for r in rows:
+        p = get_pricing(r["model"])
+        if not p:
+            continue
+        c = ((r["inp"] or 0) * p["input"] + (r["out"] or 0) * p["output"]
+             + (r["cr"] or 0) * p["cache_read"] + (r["cw"] or 0) * p["cache_write"]) / 1_000_000
+        if r["tool_name"] == "subagent":
+            sub += c
+        else:
+            main += c
+    total = main + sub
+    return {
+        "main": round(main, 2),
+        "subagent": round(sub, 2),
+        "main_pct": round((main / total * 100) if total > 0 else 0, 1),
+        "subagent_pct": round((sub / total * 100) if total > 0 else 0, 1),
+    }
+
+
 def get_dashboard_data(db_path=None):
     # Look up DB_PATH at call time, not at def time, so tests that patch
     # ``dashboard.DB_PATH`` (or ``scanner.DB_PATH``) are honoured.
@@ -455,6 +488,7 @@ def get_dashboard_data(db_path=None):
     for s in sessions_all:
         s["tags"] = _tags_map.get(s["session_id"], [])
     streak = _compute_streak(conn)
+    subagent_split = _subagent_split(conn)
     conn.close()
 
     return {
@@ -465,6 +499,7 @@ def get_dashboard_data(db_path=None):
         "plan_recommendation": plan_recommendation,
         "dow_hour":        dow_hour,
         "streak":          streak,
+        "subagent_split": subagent_split,
         "generated_at":       datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
