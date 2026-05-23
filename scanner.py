@@ -40,6 +40,21 @@ def get_db(db_path=DB_PATH):
     return conn
 
 
+
+
+
+def _migrate_schema(conn):
+    """Idempotent schema upgrades for DBs created before tier-aware columns."""
+    for sql in (
+        "ALTER TABLE turns ADD COLUMN cache_1h_tokens INTEGER DEFAULT 0",
+        "ALTER TABLE sessions ADD COLUMN total_cache_1h INTEGER DEFAULT 0",
+    ):
+        try:
+            conn.execute(sql)
+        except sqlite3.OperationalError:
+            pass  # column already exists
+
+
 def init_db(conn):
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS sessions (
@@ -52,6 +67,7 @@ def init_db(conn):
             total_output_tokens     INTEGER DEFAULT 0,
             total_cache_read        INTEGER DEFAULT 0,
             total_cache_creation    INTEGER DEFAULT 0,
+            total_cache_1h          INTEGER DEFAULT 0,
             model           TEXT,
             turn_count      INTEGER DEFAULT 0,
             session_name    TEXT
@@ -66,6 +82,7 @@ def init_db(conn):
             output_tokens           INTEGER DEFAULT 0,
             cache_read_tokens       INTEGER DEFAULT 0,
             cache_creation_tokens   INTEGER DEFAULT 0,
+            cache_1h_tokens         INTEGER DEFAULT 0,
             tool_name               TEXT,
             cwd                     TEXT,
             message_id              TEXT
@@ -208,10 +225,16 @@ def parse_jsonl_file(filepath):
                     input_tokens = usage.get("input_tokens", 0) or 0
                     output_tokens = usage.get("output_tokens", 0) or 0
                     cache_read = usage.get("cache_read_input_tokens", 0) or 0
-                    cache_creation = usage.get("cache_creation_input_tokens", 0) or 0
+                    cache_creation_total = usage.get("cache_creation_input_tokens", 0) or 0
+                    # `usage.cache_creation` (if present) splits the total into
+                    # 5-minute and 1-hour tiers. Older logs without the breakdown
+                    # are treated as entirely 5m.
+                    cc_breakdown = usage.get("cache_creation") or {}
+                    cache_1h = int(cc_breakdown.get("ephemeral_1h_input_tokens", 0) or 0)
+                    cache_creation = max(0, int(cache_creation_total) - cache_1h)
 
                     # Only record turns that have actual token usage
-                    if input_tokens + output_tokens + cache_read + cache_creation == 0:
+                    if input_tokens + output_tokens + cache_read + cache_creation + cache_1h == 0:
                         continue
 
                     # Extract tool name from content if present
@@ -232,6 +255,7 @@ def parse_jsonl_file(filepath):
                         "output_tokens": output_tokens,
                         "cache_read_tokens": cache_read,
                         "cache_creation_tokens": cache_creation,
+                        "cache_1h_tokens": cache_1h,
                         "tool_name": tool_name,
                         "cwd": cwd,
                         "message_id": message_id,
@@ -259,6 +283,7 @@ def aggregate_sessions(session_metas, turns):
         "total_output_tokens": 0,
         "total_cache_read": 0,
         "total_cache_creation": 0,
+        "total_cache_1h": 0,
         "turn_count": 0,
         "model": None,
     })
@@ -270,6 +295,7 @@ def aggregate_sessions(session_metas, turns):
         s["total_output_tokens"] += t["output_tokens"]
         s["total_cache_read"] += t["cache_read_tokens"]
         s["total_cache_creation"] += t["cache_creation_tokens"]
+        s["total_cache_1h"] += t.get("cache_1h_tokens", 0)
         s["turn_count"] += 1
         if t["model"]:
             session_model_counts[t["session_id"]][t["model"]] += 1
@@ -296,7 +322,7 @@ def upsert_sessions(conn, sessions):
         # Check if session exists
         existing = conn.execute(
             "SELECT total_input_tokens, total_output_tokens, total_cache_read, "
-            "total_cache_creation, turn_count FROM sessions WHERE session_id = ?",
+            "total_cache_creation, total_cache_1h, turn_count FROM sessions WHERE session_id = ?",
             (s["session_id"],)
         ).fetchone()
 
@@ -305,14 +331,14 @@ def upsert_sessions(conn, sessions):
                 INSERT INTO sessions
                     (session_id, project_name, first_timestamp, last_timestamp,
                      git_branch, total_input_tokens, total_output_tokens,
-                     total_cache_read, total_cache_creation, model, turn_count,
+                     total_cache_read, total_cache_creation, total_cache_1h, model, turn_count,
                      session_name)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 s["session_id"], s["project_name"], s["first_timestamp"],
                 s["last_timestamp"], s["git_branch"],
                 s["total_input_tokens"], s["total_output_tokens"],
-                s["total_cache_read"], s["total_cache_creation"],
+                s["total_cache_read"], s["total_cache_creation"], s.get("total_cache_1h", 0),
                 s["model"], s["turn_count"], s.get("session_name")
             ))
         else:
@@ -337,6 +363,7 @@ def upsert_sessions(conn, sessions):
                     total_output_tokens = total_output_tokens + ?,
                     total_cache_read = total_cache_read + ?,
                     total_cache_creation = total_cache_creation + ?,
+                    total_cache_1h = total_cache_1h + ?,
                     turn_count = turn_count + ?,
                     model = ?,
                     session_name = COALESCE(NULLIF(?, ''), session_name)
@@ -345,6 +372,7 @@ def upsert_sessions(conn, sessions):
                 s["last_timestamp"],
                 s["total_input_tokens"], s["total_output_tokens"],
                 s["total_cache_read"], s["total_cache_creation"],
+                s.get("total_cache_1h", 0),
                 s["turn_count"], model_to_set,
                 s.get("session_name"),
                 s["session_id"]
@@ -360,12 +388,13 @@ def insert_turns(conn, turns):
     conn.executemany("""
         INSERT OR REPLACE INTO turns
             (session_id, timestamp, model, input_tokens, output_tokens,
-             cache_read_tokens, cache_creation_tokens, tool_name, cwd, message_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             cache_read_tokens, cache_creation_tokens, cache_1h_tokens, tool_name, cwd, message_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, [
         (t["session_id"], t["timestamp"], t["model"],
          t["input_tokens"], t["output_tokens"],
          t["cache_read_tokens"], t["cache_creation_tokens"],
+         t.get("cache_1h_tokens", 0),
          t["tool_name"], t["cwd"], t.get("message_id", ""))
         for t in turns
     ])
@@ -524,9 +553,15 @@ def scan(projects_dir=None, projects_dirs=None, db_path=DB_PATH, verbose=True):
                             input_tokens = usage.get("input_tokens", 0) or 0
                             output_tokens = usage.get("output_tokens", 0) or 0
                             cache_read = usage.get("cache_read_input_tokens", 0) or 0
-                            cache_creation = usage.get("cache_creation_input_tokens", 0) or 0
+                            cache_creation_total = usage.get("cache_creation_input_tokens", 0) or 0
+                            # `usage.cache_creation` (if present) splits the total into
+                            # 5-minute and 1-hour tiers. Older logs without the breakdown
+                            # are treated as entirely 5m.
+                            cc_breakdown = usage.get("cache_creation") or {}
+                            cache_1h = int(cc_breakdown.get("ephemeral_1h_input_tokens", 0) or 0)
+                            cache_creation = max(0, int(cache_creation_total) - cache_1h)
 
-                            if input_tokens + output_tokens + cache_read + cache_creation == 0:
+                            if input_tokens + output_tokens + cache_read + cache_creation + cache_1h == 0:
                                 continue
 
                             tool_name = None
@@ -546,6 +581,7 @@ def scan(projects_dir=None, projects_dirs=None, db_path=DB_PATH, verbose=True):
                                 "output_tokens": output_tokens,
                                 "cache_read_tokens": cache_read,
                                 "cache_creation_tokens": cache_creation,
+                                "cache_1h_tokens": cache_1h,
                                 "tool_name": tool_name,
                                 "cwd": cwd,
                                 "message_id": message_id,
@@ -594,6 +630,7 @@ def scan(projects_dir=None, projects_dirs=None, db_path=DB_PATH, verbose=True):
                 total_output_tokens = COALESCE((SELECT SUM(output_tokens) FROM turns WHERE turns.session_id = sessions.session_id), 0),
                 total_cache_read = COALESCE((SELECT SUM(cache_read_tokens) FROM turns WHERE turns.session_id = sessions.session_id), 0),
                 total_cache_creation = COALESCE((SELECT SUM(cache_creation_tokens) FROM turns WHERE turns.session_id = sessions.session_id), 0),
+                total_cache_1h = COALESCE((SELECT SUM(cache_1h_tokens) FROM turns WHERE turns.session_id = sessions.session_id), 0),
                 turn_count = COALESCE((SELECT COUNT(*) FROM turns WHERE turns.session_id = sessions.session_id), 0)
         """)
         conn.commit()

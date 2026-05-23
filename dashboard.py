@@ -6,7 +6,7 @@ import json
 import os
 import sqlite3
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 from pathlib import Path
 
 from pricing import PRICING
@@ -195,6 +195,9 @@ def get_dashboard_data(db_path=DB_PATH):
 
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
+    # Make sure tier-aware columns exist even if scan hasn't run yet on this DB.
+    import scanner
+    scanner._migrate_schema(conn)
 
     # ── All models (for filter UI) ────────────────────────────────────────────
     model_rows = conn.execute("""
@@ -214,6 +217,7 @@ def get_dashboard_data(db_path=DB_PATH):
             SUM(output_tokens)         as output,
             SUM(cache_read_tokens)     as cache_read,
             SUM(cache_creation_tokens) as cache_creation,
+            SUM(cache_1h_tokens) as cache_1h,
             COUNT(*)                   as turns
         FROM turns
         GROUP BY day, model
@@ -227,6 +231,7 @@ def get_dashboard_data(db_path=DB_PATH):
         "output":         r["output"] or 0,
         "cache_read":     r["cache_read"] or 0,
         "cache_creation": r["cache_creation"] or 0,
+        "cache_1h":       r["cache_1h"] or 0,
         "turns":          r["turns"] or 0,
     } for r in daily_rows]
 
@@ -286,11 +291,13 @@ def get_dashboard_data(db_path=DB_PATH):
         except Exception:
             duration_min = 0
         sessions_all.append({
-            "session_id":    r["session_id"][:8],
-            "session_name":  r["session_name"] or "",
-            "project":       r["project_name"] or "unknown",
-            "branch":        r["git_branch"] or "",
-            "last":          (r["last_timestamp"] or "")[:16].replace("T", " "),
+            "session_id":      r["session_id"][:8],
+            "session_id_full": r["session_id"],
+            "session_name":    r["session_name"] or "",
+            "project":         r["project_name"] or "unknown",
+            "branch":          r["git_branch"] or "",
+            "first":           (r["first_timestamp"] or "")[:16].replace("T", " "),
+            "last":            (r["last_timestamp"] or "")[:16].replace("T", " "),
             "last_date":     (r["last_timestamp"] or "")[:10],
             "duration_min":  duration_min,
             "model":         r["model"] or "unknown",
@@ -309,6 +316,99 @@ def get_dashboard_data(db_path=DB_PATH):
         "hourly_by_model": hourly_by_model,
         "sessions_all":    sessions_all,
         "generated_at":    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
+def get_session_detail(session_id, db_path=DB_PATH):
+    if not db_path.exists():
+        return {"error": "Database not found. Run: python3 cli.py scan"}
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+
+    session = conn.execute("""
+        SELECT
+            session_id, project_name, first_timestamp, last_timestamp, git_branch,
+            total_input_tokens, total_output_tokens,
+            total_cache_read, total_cache_creation, model, turn_count
+        FROM sessions
+        WHERE session_id = ?
+    """, (session_id,)).fetchone()
+
+    if session is None:
+        conn.close()
+        return {"error": "Session not found"}
+
+    turn_rows = conn.execute("""
+        SELECT
+            timestamp, model, input_tokens, output_tokens,
+            cache_read_tokens, cache_creation_tokens, cache_1h_tokens, tool_name, cwd
+        FROM turns
+        WHERE session_id = ?
+        ORDER BY timestamp ASC, id ASC
+    """, (session_id,)).fetchall()
+
+    turns = []
+    tool_usage = {}
+    cwd_counts = {}
+
+    for r in turn_rows:
+        tool_name = r["tool_name"] or "reply"
+        cwd = r["cwd"] or "unknown"
+        total_tokens = (
+            (r["input_tokens"] or 0) +
+            (r["output_tokens"] or 0) +
+            (r["cache_read_tokens"] or 0) +
+            (r["cache_creation_tokens"] or 0) +
+            (r["cache_1h_tokens"] or 0)
+        )
+        turns.append({
+            "timestamp":       r["timestamp"] or "",
+            "timestamp_short": (r["timestamp"] or "")[:16].replace("T", " "),
+            "model":           r["model"] or "unknown",
+            "tool_name":       tool_name,
+            "cwd":             cwd,
+            "input":           r["input_tokens"] or 0,
+            "output":          r["output_tokens"] or 0,
+            "cache_read":      r["cache_read_tokens"] or 0,
+            "cache_creation":  r["cache_creation_tokens"] or 0,
+            "cache_1h":        r["cache_1h_tokens"] or 0,
+            "total":           total_tokens,
+        })
+
+        stats = tool_usage.setdefault(tool_name, {"tool_name": tool_name, "turns": 0, "tokens": 0})
+        stats["turns"] += 1
+        stats["tokens"] += total_tokens
+        cwd_counts[cwd] = cwd_counts.get(cwd, 0) + 1
+
+    conn.close()
+
+    try:
+        t1 = datetime.fromisoformat((session["first_timestamp"] or "").replace("Z", "+00:00"))
+        t2 = datetime.fromisoformat((session["last_timestamp"] or "").replace("Z", "+00:00"))
+        duration_min = round((t2 - t1).total_seconds() / 60, 1)
+    except Exception:
+        duration_min = 0
+
+    return {
+        "session_id":     session["session_id"],
+        "project":        session["project_name"] or "unknown",
+        "branch":         session["git_branch"] or "",
+        "first":          (session["first_timestamp"] or "")[:19].replace("T", " "),
+        "last":           (session["last_timestamp"] or "")[:19].replace("T", " "),
+        "duration_min":   duration_min,
+        "model":          session["model"] or "unknown",
+        "turns":          session["turn_count"] or 0,
+        "input":          session["total_input_tokens"] or 0,
+        "output":         session["total_output_tokens"] or 0,
+        "cache_read":     session["total_cache_read"] or 0,
+        "cache_creation": session["total_cache_creation"] or 0,
+        "tool_usage":     sorted(tool_usage.values(), key=lambda item: (-item["tokens"], item["tool_name"])),
+        "cwd_usage":      sorted(
+            [{"cwd": c, "turns": n} for c, n in cwd_counts.items()],
+            key=lambda item: (-item["turns"], item["cwd"])
+        ),
+        "turn_history":   turns,
     }
 
 
@@ -563,6 +663,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   header .meta { color: var(--muted); font-size: 12px; letter-spacing: -0.12px; }
   .appearance-btn { background: transparent; border: 1px solid var(--border); border-radius: 6px; color: var(--muted); font-size: 12px; padding: 4px 12px; cursor: pointer; letter-spacing: -0.12px; transition: all 0.15s; white-space: nowrap; }
   .appearance-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .link-btn { background: transparent; border: none; color: var(--muted); cursor: pointer; font-size: 11px; padding: 4px 8px; }
+  .link-btn:hover { color: var(--text); text-decoration: underline; }
   #rescan-btn { background: var(--card); border: 1px solid var(--border); color: var(--muted); padding: 4px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; }
   #rescan-btn:hover { color: var(--text); border-color: var(--accent); }
   #rescan-btn:disabled { opacity: 0.5; cursor: not-allowed; }
@@ -594,6 +696,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .stat-card .label { color: var(--muted); font-size: 12px; letter-spacing: -0.12px; margin-bottom: 8px; font-weight: 500; }
   .stat-card .value { font-size: 24px; font-weight: 600; letter-spacing: -0.28px; color: var(--text); }
   .stat-card .sub { color: var(--muted); font-size: 11px; margin-top: 4px; letter-spacing: -0.08px; }
+  .delta { display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 10px; font-size: 10px; font-weight: 600; vertical-align: middle; }
+  .delta-up   { background: rgba(248, 113, 113, 0.15); color: #f87171; }
+  .delta-down { background: rgba(74, 222, 128, 0.15);  color: #4ade80; }
 
   .charts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px; }
   .chart-card { background: var(--card); border-radius: var(--card-radius); border: var(--card-border); padding: 20px; box-shadow: var(--shadow); }
@@ -641,7 +746,43 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .footer-content a { color: var(--accent); text-decoration: none; }
   .footer-content a:hover { text-decoration: underline; }
 
-  @media (max-width: 768px) { .charts-grid { grid-template-columns: 1fr; } .chart-card.wide { grid-column: 1; } }
+  tr.session-row { cursor: pointer; }
+  tr.session-row.selected td { background: rgba(0,113,227,0.06); }
+  .detail-grid { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.8fr); gap: 16px; }
+  .detail-card { background: rgba(0,0,0,0.02); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+  .detail-card h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin-bottom: 12px; }
+  .detail-meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .detail-meta .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 4px; }
+  .detail-meta .value { font-size: 13px; }
+  .pill-list { display: flex; flex-wrap: wrap; gap: 8px; }
+  .pill { border: 1px solid var(--border); border-radius: 999px; padding: 5px 10px; font-size: 12px; color: var(--text); background: rgba(0,0,0,0.02); }
+  .detail-table-wrap { max-height: 360px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
+  .detail-table-wrap table th { position: sticky; top: 0; background: var(--card); }
+  .detail-table-wrap td, .detail-table-wrap th { white-space: nowrap; }
+  .hint { color: var(--muted); font-size: 12px; }
+
+  @media (max-width: 768px) {
+    .charts-grid { grid-template-columns: 1fr; }
+    .chart-card.wide { grid-column: 1; }
+    .detail-grid { grid-template-columns: 1fr; }
+  }
+
+  @media (max-width: 640px) {
+    .container { padding: 16px 12px; }
+    .header-bar { flex-direction: column; align-items: flex-start; gap: 8px; }
+    .header-bar > div, .header-bar > h1 { width: 100%; }
+    .filter-bar { flex-direction: column; align-items: stretch; gap: 12px; }
+    .range-group { overflow-x: auto; -webkit-overflow-scrolling: touch; white-space: nowrap; }
+    .range-btn { flex-shrink: 0; padding: 6px 10px; }
+    #stats-row { grid-template-columns: repeat(2, 1fr) !important; gap: 8px; }
+    .stat-card { padding: 12px; }
+    .stat-card .value { font-size: 20px; }
+    .table-card { overflow-x: auto; }
+    .table-card table { min-width: 600px; }
+    .table-card th.hide-mobile,
+    .table-card td.hide-mobile { display: none; }
+    .chart-wrap { height: 240px; }
+  }
 </style>
 </head>
 <body>
@@ -649,7 +790,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <h1>Claude Code Usage Dashboard</h1>
   <div style="display:flex;align-items:center;gap:12px">
     <div class="meta" id="meta">Loading...</div>
-    <button id="rescan-btn" onclick="triggerRescan()" title="Rebuild the database from scratch by re-scanning all JSONL files. Use if data looks stale or costs seem wrong.">&#x21bb; Rescan</button>
+    <button class="link-btn" onclick="_resetPrefs()" title="Clear saved range / model / theme preferences and reload">Reset prefs</button>
+      <button id="rescan-btn" onclick="triggerRescan()" title="Rebuild the database from scratch by re-scanning all JSONL files. Use if data looks stale or costs seem wrong.">&#x21bb; Rescan</button>
     <button class="appearance-btn" onclick="window.open('/themes','_blank')">Appearance</button>
   </div>
 </header>
@@ -712,8 +854,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         <th class="sortable" onclick="setModelSort('turns')">Turns <span class="sort-icon" id="msort-turns"></span></th>
         <th class="sortable" onclick="setModelSort('input')">Input <span class="sort-icon" id="msort-input"></span></th>
         <th class="sortable" onclick="setModelSort('output')">Output <span class="sort-icon" id="msort-output"></span></th>
-        <th class="sortable" onclick="setModelSort('cache_read')">Cache Read <span class="sort-icon" id="msort-cache_read"></span></th>
-        <th class="sortable" onclick="setModelSort('cache_creation')">Cache Creation <span class="sort-icon" id="msort-cache_creation"></span></th>
+        <th class="sortable hide-mobile" onclick="setModelSort('cache_read')">Cache Read <span class="sort-icon" id="msort-cache_read"></span></th>
+        <th class="sortable hide-mobile" onclick="setModelSort('cache_creation')">Cache Creation <span class="sort-icon" id="msort-cache_creation"></span></th>
         <th class="sortable" onclick="setModelSort('cost')">Est. Cost <span class="sort-icon" id="msort-cost"></span></th>
       </tr></thead>
       <tbody id="model-cost-body"></tbody>
@@ -721,6 +863,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   </div>
   <div class="table-card">
     <div class="section-header"><div class="section-title">Recent Sessions</div><button class="export-btn" onclick="exportSessionsCSV()" title="Export all filtered sessions to CSV">&#x2913; CSV</button></div>
+    <div class="hint" style="margin-bottom:12px;">Click a session row for branch, tool, cwd, and turn history detail.</div>
     <table>
       <thead><tr>
         <th>Session</th>
@@ -735,6 +878,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       </tr></thead>
       <tbody id="sessions-body"></tbody>
     </table>
+  </div>
+  <div class="table-card" id="session-detail-card" style="display:none;">
+    <div class="section-title">Session Detail</div>
+    <div id="session-detail"></div>
   </div>
   <div class="table-card">
     <div class="section-header"><div class="section-title">Cost by Project</div><button class="export-btn" onclick="exportProjectsCSV()" title="Export all projects to CSV">&#x2913; CSV</button></div>
@@ -816,7 +963,25 @@ function esc(s) {
 // ── State ──────────────────────────────────────────────────────────────────
 let rawData = null;
 let selectedModels = new Set();
-let selectedRange = '30d';
+const LS_KEY = 'claude-usage-prefs/v1';
+function _loadPrefs() {
+  try { return JSON.parse(localStorage.getItem(LS_KEY) || '{}') || {}; }
+  catch (e) { return {}; }
+}
+function _savePrefs(patch) {
+  try {
+    const cur = _loadPrefs();
+    const next = Object.assign({}, cur, patch);
+    localStorage.setItem(LS_KEY, JSON.stringify(next));
+  } catch (e) { /* private mode / quota / SSR */ }
+}
+function _resetPrefs() {
+  try { localStorage.removeItem(LS_KEY); } catch (e) {}
+  window.location.search = '';  // clears URL params + reloads
+}
+
+let selectedRange = (_loadPrefs().range) || '30d';
+let selectedSessionId = null;
 let charts = {};
 let sessionSortCol = 'last';
 let modelSortCol = 'cost';
@@ -829,7 +994,7 @@ let lastFilteredSessions = [];
 let lastByProject = [];
 let lastByProjectBranch = [];
 let sessionSortDir = 'desc';
-let hourlyTZ = 'local';  // 'local' or 'utc'
+let hourlyTZ = (_loadPrefs().hourlyTZ) || 'local';  // 'local' or 'utc'
 
 // ── Peak-hour config ───────────────────────────────────────────────────────
 // Anthropic throttles Mon–Fri 05:00–11:00 PT. We approximate as fixed UTC hours
@@ -893,7 +1058,7 @@ function getPricing(model) {
   return null;
 }
 
-function calcCost(model, inp, out, cacheRead, cacheCreation) {
+function calcCost(model, inp, out, cacheRead, cacheCreation, cache1h = 0) {
   if (!isBillable(model)) return 0;
   const p = getPricing(model);
   if (!p) return 0;
@@ -901,7 +1066,8 @@ function calcCost(model, inp, out, cacheRead, cacheCreation) {
     inp           * p.input       / 1e6 +
     out           * p.output      / 1e6 +
     cacheRead     * p.cache_read  / 1e6 +
-    cacheCreation * p.cache_write / 1e6
+    (cacheCreation || 0) * (p.cache_write_5m || p.cache_write) / 1e6
+    + (cache1h || 0) * (p.cache_write_1h || (p.cache_write * 1.6)) / 1e6
   );
 }
 
@@ -967,7 +1133,7 @@ function getRangeBounds(range) {
   const days = range === '7d' ? 7 : range === '30d' ? 30 : 90;
   const d = new Date();
   d.setDate(d.getDate() - days);
-  return { start: iso(d), end: null };
+  return { start: iso(d), end: iso(today) };
 }
 
 function readURLRange() {
@@ -976,6 +1142,7 @@ function readURLRange() {
 }
 
 function setRange(range) {
+  _savePrefs({ range: range });
   selectedRange = range;
   document.querySelectorAll('.range-btn').forEach(btn =>
     btn.classList.toggle('active', btn.dataset.range === range)
@@ -986,6 +1153,7 @@ function setRange(range) {
 }
 
 function setHourlyTZ(mode) {
+  _savePrefs({ hourlyTZ: tz });
   hourlyTZ = mode;
   document.querySelectorAll('.tz-btn').forEach(btn =>
     btn.classList.toggle('active', btn.dataset.tz === mode)
@@ -1035,6 +1203,7 @@ function buildFilterUI(allModels) {
 }
 
 function onModelToggle(cb) {
+  _savePrefs({ models: Array.from(selectedModels) });
   const label = cb.closest('label');
   if (cb.checked) { selectedModels.add(cb.value);    label.classList.add('checked'); }
   else            { selectedModels.delete(cb.value); label.classList.remove('checked'); }
@@ -1043,6 +1212,7 @@ function onModelToggle(cb) {
 }
 
 function selectAllModels() {
+  _savePrefs({ models: Array.from(selectedModels) });
   document.querySelectorAll('#model-checkboxes input').forEach(cb => {
     cb.checked = true; selectedModels.add(cb.value); cb.closest('label').classList.add('checked');
   });
@@ -1088,8 +1258,8 @@ function sortSessions(sessions) {
   return [...sessions].sort((a, b) => {
     let av, bv;
     if (sessionSortCol === 'cost') {
-      av = calcCost(a.model, a.input, a.output, a.cache_read, a.cache_creation);
-      bv = calcCost(b.model, b.input, b.output, b.cache_read, b.cache_creation);
+      av = calcCost(a.model, a.input, a.output, a.cache_read, a.cache_creation, a.cache_1h);
+      bv = calcCost(b.model, b.input, b.output, b.cache_read, b.cache_creation, b.cache_1h);
     } else if (sessionSortCol === 'duration_min') {
       av = parseFloat(a.duration_min) || 0;
       bv = parseFloat(b.duration_min) || 0;
@@ -1113,6 +1283,35 @@ function applyFilter() {
   const filteredDaily = rawData.daily_by_model.filter(r =>
     selectedModels.has(r.model) && (!start || r.day >= start) && (!end || r.day <= end)
   );
+
+  // Previous-period totals (same-length window ending the day before `start`)
+  // so each stat card can show a delta vs. the equivalent prior window.
+  let prevTotals = null;
+  if (start && end) {
+    const [prevStart, prevEnd] = _prevWindow(start, end);
+    const prevDaily = rawData.daily_by_model.filter(r =>
+      selectedModels.has(r.model) && r.day >= prevStart && r.day <= prevEnd
+    );
+    prevTotals = { input: 0, output: 0, cache_read: 0, cache_creation: 0, turns: 0, cost: 0 };
+    const prevSessIds = new Set();
+    for (const r of prevDaily) {
+      prevTotals.input  += r.input;
+      prevTotals.output += r.output;
+      prevTotals.cache_read     += r.cache_read;
+      prevTotals.cache_creation += r.cache_creation;
+      prevTotals.turns  += r.turns;
+    }
+    // Sessions: count sessions whose last_date is in the previous window
+    for (const s of rawData.sessions_all) {
+      if (!selectedModels.has(s.model)) continue;
+      if (s.last_date >= prevStart && s.last_date <= prevEnd) prevSessIds.add(s.session_id);
+    }
+    prevTotals.sessions = prevSessIds.size;
+    prevTotals.cost = prevDaily.reduce(
+      (acc, r) => acc + calcCost(r.model, r.input, r.output, r.cache_read, r.cache_creation),
+      0,
+    );
+  }
 
   // Daily chart: aggregate by day
   const dailyMap = {};
@@ -1161,7 +1360,7 @@ function applyFilter() {
     p.cache_creation += s.cache_creation;
     p.turns          += s.turns;
     p.sessions++;
-    p.cost += calcCost(s.model, s.input, s.output, s.cache_read, s.cache_creation);
+    p.cost += calcCost(s.model, s.input, s.output, s.cache_read, s.cache_creation, s.cache_1h);
   }
   const byProject = Object.values(projMap).sort((a, b) => (b.input + b.output) - (a.input + a.output));
 
@@ -1177,11 +1376,22 @@ function applyFilter() {
     pb.cache_creation += s.cache_creation;
     pb.turns          += s.turns;
     pb.sessions++;
-    pb.cost += calcCost(s.model, s.input, s.output, s.cache_read, s.cache_creation);
+    pb.cost += calcCost(s.model, s.input, s.output, s.cache_read, s.cache_creation, s.cache_1h);
   }
   const byProjectBranch = Object.values(projBranchMap).sort((a, b) => b.cost - a.cost);
 
   // Totals
+  // Count distinct models that have token usage in the filtered window but
+  // aren't priced (e.g. router proxies, custom finetunes). The Est. Cost
+  // card aggregates only billable models; this lets us tell the user how
+  // many models we silently dropped.
+  const nonBillableModels = new Set();
+  for (const r of filteredDaily) {
+    if (!isBillable(r.model) && (r.input + r.output) > 0) {
+      nonBillableModels.add(r.model);
+    }
+  }
+
   const totals = {
     sessions:       filteredSessions.length,
     turns:          byModel.reduce((s, m) => s + m.turns, 0),
@@ -1189,7 +1399,9 @@ function applyFilter() {
     output:         byModel.reduce((s, m) => s + m.output, 0),
     cache_read:     byModel.reduce((s, m) => s + m.cache_read, 0),
     cache_creation: byModel.reduce((s, m) => s + m.cache_creation, 0),
-    cost:           byModel.reduce((s, m) => s + calcCost(m.model, m.input, m.output, m.cache_read, m.cache_creation), 0),
+    cost:           byModel.reduce((s, m) => s + calcCost(m.model, m.input, m.output, m.cache_read, m.cache_creation, m.cache_1h), 0),
+    nonBillableCount: nonBillableModels.size,
+    nonBillableModels: Array.from(nonBillableModels),
   };
 
   // Hourly aggregation (filtered by model + range, then bucketed by UTC hour)
@@ -1202,7 +1414,7 @@ function applyFilter() {
   document.getElementById('daily-chart-title').textContent = 'Daily Token Usage \u2014 ' + RANGE_LABELS[selectedRange];
   document.getElementById('hourly-chart-title').textContent = 'Average Hourly Distribution \u2014 ' + RANGE_LABELS[selectedRange];
 
-  renderStats(totals);
+  renderStats(totals, prevTotals);
   renderDailyChart(daily);
   renderHourlyChart(hourlyAgg);
   renderModelChart(byModel);
@@ -1215,23 +1427,149 @@ function applyFilter() {
   renderModelCostTable(byModel);
   renderProjectCostTable(lastByProject.slice(0, 20));
   renderProjectBranchCostTable(lastByProjectBranch.slice(0, 20));
+
+  const visibleSessions = lastFilteredSessions.slice(0, 20);
+  if (!visibleSessions.length) {
+    selectedSessionId = null;
+    document.getElementById('session-detail-card').style.display = 'none';
+    return;
+  }
+  if (!selectedSessionId || !visibleSessions.some(s => s.session_id_full === selectedSessionId)) {
+    selectedSessionId = visibleSessions[0].session_id_full;
+  }
+  selectSession(selectedSessionId);
 }
 
-// ── Renderers ──────────────────────────────────────────────────────────────
-function renderStats(t) {
+function selectSession(sessionId) {
+  selectedSessionId = sessionId;
+  document.querySelectorAll('tr.session-row').forEach(row =>
+    row.classList.toggle('selected', row.dataset.sessionId === sessionId)
+  );
+  loadSessionDetail(sessionId);
+}
+
+async function loadSessionDetail(sessionId) {
+  if (!sessionId) return;
+  try {
+    const resp = await fetch('/api/session?session_id=' + encodeURIComponent(sessionId));
+    if (selectedSessionId !== sessionId) return;
+    const detail = await resp.json();
+    if (detail.error) return;
+    renderSessionDetail(detail);
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+function renderSessionDetail(detail) {
+  const detailCard = document.getElementById('session-detail-card');
+  detailCard.style.display = '';
+
+  const toolPills = detail.tool_usage.length
+    ? detail.tool_usage.map(t => `<span class="pill">${esc(t.tool_name)} · ${fmt(t.tokens)} tokens · ${fmt(t.turns)} turns</span>`).join('')
+    : '<div class="hint">No tool usage recorded.</div>';
+
+  const cwdPills = detail.cwd_usage.length
+    ? detail.cwd_usage.map(c => `<span class="pill">${esc(c.cwd)} · ${fmt(c.turns)} turns</span>`).join('')
+    : '<div class="hint">No working directory recorded.</div>';
+
+  document.getElementById('session-detail').innerHTML = `
+    <div class="detail-meta">
+      <div><div class="label">Session</div><div class="value" style="font-family:monospace">${esc(detail.session_id)}</div></div>
+      <div><div class="label">Project</div><div class="value">${esc(detail.project)}</div></div>
+      <div><div class="label">Branch</div><div class="value">${esc(detail.branch || 'n/a')}</div></div>
+      <div><div class="label">Model</div><div class="value">${esc(detail.model)}</div></div>
+      <div><div class="label">First Seen</div><div class="value">${esc(detail.first)}</div></div>
+      <div><div class="label">Last Seen</div><div class="value">${esc(detail.last)}</div></div>
+      <div><div class="label">Duration</div><div class="value">${esc(String(detail.duration_min))}m</div></div>
+      <div><div class="label">Tokens</div><div class="value">${fmt(detail.input + detail.output + detail.cache_read + detail.cache_creation)}</div></div>
+    </div>
+    <div class="detail-grid">
+      <div class="detail-card">
+        <h3>Turn History</h3>
+        <div class="detail-table-wrap">
+          <table>
+            <thead><tr>
+              <th>Time</th><th>Tool</th><th>Model</th><th>Input</th><th>Output</th><th>Cache Read</th><th>Cache Write</th><th>Total</th>
+            </tr></thead>
+            <tbody>${detail.turn_history.map(t => `
+              <tr>
+                <td class="muted">${esc(t.timestamp_short)}</td>
+                <td>${esc(t.tool_name)}</td>
+                <td>${esc(t.model)}</td>
+                <td class="num">${fmt(t.input)}</td>
+                <td class="num">${fmt(t.output)}</td>
+                <td class="num">${fmt(t.cache_read)}</td>
+                <td class="num">${fmt((t.cache_creation || 0) + (t.cache_1h || 0))}</td>
+                <td class="num">${fmt(t.total)}</td>
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div>
+        <div class="detail-card" style="margin-bottom:16px;">
+          <h3>Tool Usage</h3>
+          <div class="pill-list">${toolPills}</div>
+        </div>
+        <div class="detail-card">
+          <h3>Working Directories</h3>
+          <div class="pill-list">${cwdPills}</div>
+        </div>
+      </div>
+    </div>`;
+}
+
+// ── Renderers ────────────────────────────────────────────────────────────────────────────
+function _costSub(t) {
+  const base = 'API pricing, Apr 2026';
+  if (!t || !t.nonBillableCount) return base;
+  const n = t.nonBillableCount;
+  return base + ' • ' + n + ' model' + (n === 1 ? '' : 's') + ' excluded';
+}
+function _costTitle(t) {
+  if (!t || !t.nonBillableCount) return '';
+  return 'Excluded from cost (not in PRICING table): ' +
+    (t.nonBillableModels || []).slice(0, 5).join(', ') +
+    (t.nonBillableModels.length > 5 ? ', ...' : '');
+}
+
+function _prevWindow(start, end) {
+  // Return [prevStart, prevEnd] — a same-length window ending the day before
+  // `start` (inclusive). Dates are YYYY-MM-DD strings, manipulated via Date.
+  const sd = new Date(start + 'T00:00:00Z');
+  const ed = new Date(end + 'T00:00:00Z');
+  const lenMs = ed - sd;
+  const prevEnd = new Date(sd.getTime() - 24 * 3600 * 1000);
+  const prevStart = new Date(prevEnd.getTime() - lenMs);
+  const fmtD = d => d.toISOString().slice(0, 10);
+  return [fmtD(prevStart), fmtD(prevEnd)];
+}
+
+function _deltaBadge(curr, prev) {
+  if (prev == null || prev === undefined) return '';
+  if (prev === 0) return curr > 0 ? ' <span class="delta delta-up">new</span>' : '';
+  const pct = ((curr - prev) / prev) * 100;
+  if (Math.abs(pct) < 1) return '';  // ignore noise
+  const sign = pct > 0 ? '+' : '';
+  const cls = pct > 0 ? 'delta-up' : 'delta-down';
+  return ` <span class="delta ${cls}">${sign}${pct.toFixed(0)}%</span>`;
+}
+
+function renderStats(t, prev) {
   const rangeLabel = RANGE_LABELS[selectedRange].toLowerCase();
   const stats = [
-    { label: 'Sessions',       value: t.sessions.toLocaleString(), sub: rangeLabel },
-    { label: 'Turns',          value: fmt(t.turns),                sub: rangeLabel },
-    { label: 'Input Tokens',   value: fmt(t.input),                sub: rangeLabel },
-    { label: 'Output Tokens',  value: fmt(t.output),               sub: rangeLabel },
-    { label: 'Cache Read',     value: fmt(t.cache_read),           sub: 'from prompt cache' },
-    { label: 'Cache Creation', value: fmt(t.cache_creation),       sub: 'writes to prompt cache' },
-    { label: 'Est. Cost',      value: fmtCostBig(t.cost),          sub: 'API pricing, Apr 2026', color: '#4ade80' },
+    { label: 'Sessions',       value: t.sessions.toLocaleString(), sub: rangeLabel,               delta: prev && _deltaBadge(t.sessions, prev.sessions) },
+    { label: 'Turns',          value: fmt(t.turns),                sub: rangeLabel,               delta: prev && _deltaBadge(t.turns, prev.turns) },
+    { label: 'Input Tokens',   value: fmt(t.input),                sub: rangeLabel,               delta: prev && _deltaBadge(t.input, prev.input) },
+    { label: 'Output Tokens',  value: fmt(t.output),               sub: rangeLabel,               delta: prev && _deltaBadge(t.output, prev.output) },
+    { label: 'Cache Read',     value: fmt(t.cache_read),           sub: 'from prompt cache',      delta: prev && _deltaBadge(t.cache_read, prev.cache_read) },
+    { label: 'Cache Creation', value: fmt(t.cache_creation),       sub: 'writes to prompt cache', delta: prev && _deltaBadge(t.cache_creation, prev.cache_creation) },
+    { label: 'Est. Cost',      value: fmtCostBig(t.cost),          sub: _costSub(t), color: '#4ade80', title: _costTitle(t), delta: prev && _deltaBadge(t.cost, prev.cost) },
   ];
   document.getElementById('stats-row').innerHTML = stats.map(s => `
-    <div class="stat-card">
-      <div class="label">${s.label}</div>
+    <div class="stat-card" title="${s.title ? esc(s.title) : ''}">
+      <div class="label">${s.label}${s.delta || ''}</div>
       <div class="value" style="${s.color ? 'color:' + s.color : ''}">${esc(s.value)}</div>
       ${s.sub ? `<div class="sub">${esc(s.sub)}</div>` : ''}
     </div>
@@ -1389,6 +1727,7 @@ function renderPareto(filteredSessions) {  // eslint-disable-line no-unused-vars
     return;
   }
   const withCost = filteredSessions.map(s => Object.assign({}, s, {
+    cost: calcCost(s.model, s.input, s.output, s.cache_read, s.cache_creation, s.cache_1h || 0),
     cost: calcCost(s.model, s.input, s.output, s.cache_read, s.cache_creation),
   })).filter(s => s.cost > 0);
   if (!withCost.length) { el.style.display = "none"; return; }
@@ -1428,14 +1767,14 @@ function renderProjectChart(byProject) {
 
 function renderSessionsTable(sessions) {
   document.getElementById('sessions-body').innerHTML = sessions.map(s => {
-    const cost = calcCost(s.model, s.input, s.output, s.cache_read, s.cache_creation);
+    const cost = calcCost(s.model, s.input, s.output, s.cache_read, s.cache_creation, s.cache_1h);
     const costCell = isBillable(s.model)
       ? `<td class="cost">${fmtCost(cost)}</td>`
       : `<td class="cost-na">n/a</td>`;
     const sessionCell = s.session_name
       ? `<td><span class="session-name">${esc(s.session_name)}</span> <span class="muted" style="font-family:monospace">(${esc(s.session_id)}&hellip;)</span></td>`
       : `<td class="muted" style="font-family:monospace">${esc(s.session_id)}&hellip;</td>`;
-    return `<tr>
+    return `<tr class="session-row ${selectedSessionId === s.session_id_full ? 'selected' : ''}" data-session-id="${esc(s.session_id_full)}">
       ${sessionCell}
       <td>${esc(s.project)}</td>
       <td class="muted">${esc(s.last)}</td>
@@ -1447,6 +1786,10 @@ function renderSessionsTable(sessions) {
       ${costCell}
     </tr>`;
   }).join('');
+  document.getElementById('sessions-body').addEventListener('click', function(e) {
+    const row = e.target.closest('tr.session-row');
+    if (row) selectSession(row.dataset.sessionId);
+  });
 }
 
 function setModelSort(col) {
@@ -1470,8 +1813,8 @@ function sortModels(byModel) {
   return [...byModel].sort((a, b) => {
     let av, bv;
     if (modelSortCol === 'cost') {
-      av = calcCost(a.model, a.input, a.output, a.cache_read, a.cache_creation);
-      bv = calcCost(b.model, b.input, b.output, b.cache_read, b.cache_creation);
+      av = calcCost(a.model, a.input, a.output, a.cache_read, a.cache_creation, a.cache_1h);
+      bv = calcCost(b.model, b.input, b.output, b.cache_read, b.cache_creation, b.cache_1h);
     } else {
       av = a[modelSortCol] ?? 0;
       bv = b[modelSortCol] ?? 0;
@@ -1484,7 +1827,7 @@ function sortModels(byModel) {
 
 function renderModelCostTable(byModel) {
   document.getElementById('model-cost-body').innerHTML = sortModels(byModel).map(m => {
-    const cost = calcCost(m.model, m.input, m.output, m.cache_read, m.cache_creation);
+    const cost = calcCost(m.model, m.input, m.output, m.cache_read, m.cache_creation, m.cache_1h);
     const costCell = isBillable(m.model)
       ? `<td class="cost">${fmtCost(cost)}</td>`
       : `<td class="cost-na">n/a</td>`;
@@ -1618,7 +1961,7 @@ function downloadCSV(reportType, header, rows) {
 function exportSessionsCSV() {
   const header = ['Session ID', 'Session Name', 'Project', 'Last Active', 'Duration (min)', 'Model', 'Turns', 'Input', 'Output', 'Cache Read', 'Cache Creation', 'Est. Cost'];
   const rows = lastFilteredSessions.map(s => {
-    const cost = calcCost(s.model, s.input, s.output, s.cache_read, s.cache_creation);
+    const cost = calcCost(s.model, s.input, s.output, s.cache_read, s.cache_creation, s.cache_1h);
     return [s.session_id, s.session_name || '', s.project, s.last, s.duration_min, s.model, s.turns, s.input, s.output, s.cache_read, s.cache_creation, cost.toFixed(4)];
   });
   downloadCSV('sessions', header, rows);
@@ -1649,7 +1992,20 @@ async function triggerRescan() {
     const resp = await fetch('/api/rescan', { method: 'POST' });
     const d = await resp.json();
     btn.textContent = '\u21bb Rescan (' + d.new + ' new, ' + d.updated + ' updated)';
-    await loadData();
+    await 
+
+// Apply localStorage prefs at startup if URL didn't carry any.
+(function bootstrapPrefs() {
+  try {
+    if (window.location.search) return;  // URL takes precedence
+    const p = _loadPrefs();
+    if (Array.isArray(p.models) && p.models.length) {
+      selectedModels = new Set(p.models);
+    }
+  } catch (e) {}
+})();
+
+loadData();
   } catch(e) {
     btn.textContent = '\u21bb Rescan (error)';
     console.error(e);
@@ -1736,10 +2092,45 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(render_html())
 
+        elif path == "/api/health":
+            # Lightweight liveness probe for Docker HEALTHCHECK / monitoring.
+            # Returns server + DB state without doing any aggregation.
+            payload = {
+                "status": "ok" if DB_PATH.exists() else "no-db",
+                "db_path": str(DB_PATH),
+                "sessions": 0,
+                "turns": 0,
+            }
+            try:
+                if DB_PATH.exists():
+                    c = sqlite3.connect(DB_PATH)
+                    payload["sessions"] = c.execute("select count(*) from sessions").fetchone()[0]
+                    payload["turns"] = c.execute("select count(*) from turns").fetchone()[0]
+                    c.close()
+            except Exception as e:  # noqa: BLE001
+                payload["status"] = "error"
+                payload["error"] = str(e)
+            body = json.dumps(payload).encode("utf-8")
+            self.send_response(200 if payload["status"] != "error" else 500)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
         elif path == "/api/data":
             data = get_dashboard_data()
             body = json.dumps(data).encode("utf-8")
             self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        elif path == "/api/session":
+            parsed_url = urlparse(self.path)
+            session_id = parse_qs(parsed_url.query).get("session_id", [""])[0]
+            data = get_session_detail(session_id)
+            body = json.dumps(data).encode("utf-8")
+            self.send_response(200 if "error" not in data else 404)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
