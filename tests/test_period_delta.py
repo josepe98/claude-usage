@@ -23,7 +23,13 @@ class TestPeriodDelta(unittest.TestCase):
         # because prev defaults to null/undefined, but we want callers to
         # actually pass prev.
         self.assertIn("function renderStats(t, prev)", dashboard.HTML_TEMPLATE)
-        self.assertIn("renderStats(totals, prevTotals)", dashboard.HTML_TEMPLATE)
+        # After A/B compare refactor, applyFilter routes through computePeriod
+        # objects (pa.totals / pa.prevTotals) instead of locals; accept either.
+        self.assertTrue(
+            "renderStats(totals, prevTotals)" in dashboard.HTML_TEMPLATE
+            or "renderStats(pa.totals, pa.prevTotals)" in dashboard.HTML_TEMPLATE,
+            "renderStats must be called with current + previous totals",
+        )
 
     def test_stats_array_includes_delta(self):
         # Each stat object should declare a delta field

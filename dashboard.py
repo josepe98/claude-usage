@@ -2081,6 +2081,21 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .delta { display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 10px; font-size: 10px; font-weight: 600; vertical-align: middle; }
   .delta-up   { background: rgba(248, 113, 113, 0.15); color: #f87171; }
   .delta-down { background: rgba(74, 222, 128, 0.15);  color: #4ade80; }
+  /* A/B compare mode */
+  .compare-toggle { padding: 5px 12px; border-radius: 8px; border: 1px solid rgba(0,0,0,0.12); background: var(--card); color: var(--muted); font-size: 12px; cursor: pointer; letter-spacing: -0.12px; transition: all 0.15s; white-space: nowrap; }
+  .compare-toggle.active { background: var(--accent); color: #ffffff; border-color: var(--accent); font-weight: 500; }
+  .compare-row { display: none; align-items: center; gap: 10px; flex-wrap: wrap; width: 100%; padding: 8px 24px; border-bottom: 1px solid var(--border); background: rgba(245, 158, 11, 0.04); }
+  .compare-row.visible { display: flex; }
+  .ab-tag { display: inline-block; min-width: 14px; padding: 1px 6px; border-radius: 4px; font-size: 10px; font-weight: 700; letter-spacing: 0.4px; vertical-align: middle; margin-right: 4px; text-align: center; }
+  .ab-tag-a { background: rgba(0, 113, 227, 0.18); color: #0071e3; }
+  .ab-tag-b { background: rgba(245, 158, 11, 0.20); color: #d97706; }
+  .ab-stat { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; font-size: 11px; }
+  .ab-stat-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .ab-stat-row .ab-cell { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+  .ab-stat-row .ab-cell.muted { color: var(--muted); font-weight: 500; }
+  .session-row.period-a td:first-child { box-shadow: inset 3px 0 0 #0071e3; }
+  .session-row.period-b td:first-child { box-shadow: inset 3px 0 0 #d97706; }
+  .session-row.period-ab td:first-child { box-shadow: inset 3px 0 0 #8b5cf6; }
 
   .charts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px; }
   .chart-card { background: var(--card); border-radius: var(--card-radius); border: var(--card-border); padding: 20px; box-shadow: var(--shadow); }
@@ -2231,6 +2246,35 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <button class="range-btn" data-range="30d" onclick="setRange('30d')">30d</button>
     <button class="range-btn" data-range="90d" onclick="setRange('90d')">90d</button>
     <button class="range-btn" data-range="all" onclick="setRange('all')">All</button>
+  </div>
+  <div class="filter-sep"></div>
+  <div class="filter-label">Compare</div>
+  <button id="compare-toggle" class="compare-toggle" onclick="toggleCompareMode()" title="Compare two periods side-by-side">off</button>
+</div>
+
+<div id="compare-row" class="compare-row">
+  <div class="filter-label"><span class="ab-tag ab-tag-a">A</span> Period A</div>
+  <div class="range-group" id="range-group-a">
+    <button class="range-btn" data-rangea="today" onclick="setRangeA('today')">Today</button>
+    <button class="range-btn" data-rangea="week" onclick="setRangeA('week')">This Week</button>
+    <button class="range-btn" data-rangea="month" onclick="setRangeA('month')">This Month</button>
+    <button class="range-btn" data-rangea="prev-month" onclick="setRangeA('prev-month')">Prev Month</button>
+    <button class="range-btn" data-rangea="7d"  onclick="setRangeA('7d')">7d</button>
+    <button class="range-btn" data-rangea="30d" onclick="setRangeA('30d')">30d</button>
+    <button class="range-btn" data-rangea="90d" onclick="setRangeA('90d')">90d</button>
+    <button class="range-btn" data-rangea="all" onclick="setRangeA('all')">All</button>
+  </div>
+  <div class="filter-sep"></div>
+  <div class="filter-label"><span class="ab-tag ab-tag-b">B</span> Period B</div>
+  <div class="range-group" id="range-group-b">
+    <button class="range-btn" data-rangeb="today" onclick="setRangeB('today')">Today</button>
+    <button class="range-btn" data-rangeb="week" onclick="setRangeB('week')">This Week</button>
+    <button class="range-btn" data-rangeb="month" onclick="setRangeB('month')">This Month</button>
+    <button class="range-btn" data-rangeb="prev-month" onclick="setRangeB('prev-month')">Prev Month</button>
+    <button class="range-btn" data-rangeb="7d"  onclick="setRangeB('7d')">7d</button>
+    <button class="range-btn" data-rangeb="30d" onclick="setRangeB('30d')">30d</button>
+    <button class="range-btn" data-rangeb="90d" onclick="setRangeB('90d')">90d</button>
+    <button class="range-btn" data-rangeb="all" onclick="setRangeB('all')">All</button>
   </div>
 </div>
 
@@ -2568,6 +2612,11 @@ function _resetPrefs() {
 
 let selectedRange = (_loadPrefs().range) || '30d';
 let selectedAccount = (_loadPrefs().account) || 'all';  // 'all' or an account name
+// A/B compare mode state. In compare mode, `selectedRange` plays the role of
+// Period A (so existing single-period URL/prefs stay compatible), and the
+// new `selectedRangeB` adds the second window.
+let compareMode = !!_loadPrefs().compareMode;
+let selectedRangeB = (_loadPrefs().rangeB) || 'prev-month';
 let selectedSessionId = null;
 let charts = {};
 let sessionSortCol = 'last';
@@ -2757,8 +2806,12 @@ function readURLRange() {
 function setRange(range) {
   _savePrefs({ range: range });
   selectedRange = range;
-  document.querySelectorAll('.range-btn').forEach(btn =>
+  document.querySelectorAll('[data-range]').forEach(btn =>
     btn.classList.toggle('active', btn.dataset.range === range)
+  );
+  // Keep Period A row in sync when user picks from the main pills.
+  document.querySelectorAll('[data-rangea]').forEach(btn =>
+    btn.classList.toggle('active', btn.dataset.rangea === range)
   );
   updateURL();
   applyFilter();
@@ -2811,6 +2864,43 @@ function onAccountChange(value) {
   _savePrefs({ account: selectedAccount });
   updateURL();
   applyFilter();
+// ── A/B compare mode ───────────────────────────────────────────────────────
+function toggleCompareMode() {
+  compareMode = !compareMode;
+  _savePrefs({ compareMode: compareMode });
+  updateCompareUI();
+  applyFilter();
+}
+
+function setRangeA(range) {
+  // Period A is the existing `selectedRange` — keep them in sync.
+  setRange(range);
+}
+
+function setRangeB(range) {
+  _savePrefs({ rangeB: range });
+  selectedRangeB = range;
+  document.querySelectorAll('[data-rangeb]').forEach(btn =>
+    btn.classList.toggle('active', btn.dataset.rangeb === range)
+  );
+  applyFilter();
+}
+
+function updateCompareUI() {
+  const btn = document.getElementById('compare-toggle');
+  const row = document.getElementById('compare-row');
+  if (btn) {
+    btn.textContent = compareMode ? 'on' : 'off';
+    btn.classList.toggle('active', compareMode);
+  }
+  if (row) row.classList.toggle('visible', compareMode);
+  // Mirror the main range pills onto Period A buttons.
+  document.querySelectorAll('[data-rangea]').forEach(b =>
+    b.classList.toggle('active', b.dataset.rangea === selectedRange)
+  );
+  document.querySelectorAll('[data-rangeb]').forEach(b =>
+    b.classList.toggle('active', b.dataset.rangeb === selectedRangeB)
+  );
 }
 
 // ── Model filter ───────────────────────────────────────────────────────────
@@ -2927,12 +3017,13 @@ function sortSessions(sessions) {
 }
 
 // ── Aggregation & filtering ────────────────────────────────────────────────
-function applyFilter() {
-  if (!rawData) return;
+// computePeriod(range) — pure aggregation for one window. Used once in the
+// default case and twice in A/B compare-mode (one call per period). The
+// returned object carries totals, sorted breakdowns, daily series, and the
+// filtered session list so callers can pipe each piece to its renderer.
+function computePeriod(range) {
+  const { start, end } = getRangeBounds(range);
 
-  const { start, end } = getRangeBounds(selectedRange);
-
-  // Filter daily rows by model + date range
   const filteredDaily = rawData.daily_by_model.filter(r =>
     selectedModels.has(r.model) && (!start || r.day >= start) && (!end || r.day <= end)
   );
@@ -2969,6 +3060,7 @@ function applyFilter() {
   }
 
   // Daily chart: aggregate by day
+  // Daily chart series
   const dailyMap = {};
   for (const r of filteredDaily) {
     if (!dailyMap[r.day]) dailyMap[r.day] = { day: r.day, input: 0, output: 0, cache_read: 0, cache_creation: 0 };
@@ -2980,7 +3072,7 @@ function applyFilter() {
   }
   const daily = Object.values(dailyMap).sort((a, b) => a.day.localeCompare(b.day));
 
-  // By model: aggregate tokens + turns from daily data
+  // By model
   const modelMap = {};
   for (const r of filteredDaily) {
     if (!modelMap[r.model]) modelMap[r.model] = { model: r.model, input: 0, output: 0, cache_read: 0, cache_creation: 0, turns: 0, sessions: 0 };
@@ -2994,6 +3086,7 @@ function applyFilter() {
 
   // Filter sessions by model + date range
   const filteredSessions = rawData.sessions_all.filter(s => _matchesSearch(s) &&
+  const filteredSessions = rawData.sessions_all.filter(s =>
     selectedModels.has(s.model) && (!start || s.last_date >= start) && (!end || s.last_date <= end)
   // Filter sessions by model + date range + account
   const inAccount = (s) => selectedAccount === 'all' || (s.account || 'default') === selectedAccount;
@@ -3006,15 +3099,12 @@ function applyFilter() {
     && (!end || s.last_date <= end)
     && (!selectedMachine || s.machine_id === selectedMachine)
   );
-
-  // Add session counts into modelMap
   for (const s of filteredSessions) {
     if (modelMap[s.model]) modelMap[s.model].sessions++;
   }
-
   const byModel = Object.values(modelMap).sort((a, b) => (b.input + b.output) - (a.input + a.output));
 
-  // By project: aggregate from filtered sessions
+  // By project
   const projMap = {};
   for (const s of filteredSessions) {
     if (!projMap[s.project]) projMap[s.project] = { project: s.project, input: 0, output: 0, cache_read: 0, cache_creation: 0, turns: 0, sessions: 0, cost: 0 };
@@ -3029,7 +3119,7 @@ function applyFilter() {
   }
   const byProject = Object.values(projMap).sort((a, b) => (b.input + b.output) - (a.input + a.output));
 
-  // By project+branch: aggregate from filtered sessions
+  // By project+branch
   const projBranchMap = {};
   for (const s of filteredSessions) {
     const key = s.project + '\x00' + (s.branch || '');
@@ -3073,15 +3163,45 @@ function applyFilter() {
     nonBillableModels: Array.from(nonBillableModels),
   };
 
-  // Hourly aggregation (filtered by model + range, then bucketed by UTC hour)
+  // Previous-period totals (same-length window ending the day before `start`)
+  let prevTotals = null;
+  if (start && end) {
+    const [prevStart, prevEnd] = _prevWindow(start, end);
+    const prevDaily = rawData.daily_by_model.filter(r =>
+      selectedModels.has(r.model) && r.day >= prevStart && r.day <= prevEnd
+    );
+    prevTotals = { input: 0, output: 0, cache_read: 0, cache_creation: 0, turns: 0, cost: 0 };
+    const prevSessIds = new Set();
+    for (const r of prevDaily) {
+      prevTotals.input  += r.input;
+      prevTotals.output += r.output;
+      prevTotals.cache_read     += r.cache_read;
+      prevTotals.cache_creation += r.cache_creation;
+      prevTotals.turns  += r.turns;
+    }
+    for (const s of rawData.sessions_all) {
+      if (!selectedModels.has(s.model)) continue;
+      if (s.last_date >= prevStart && s.last_date <= prevEnd) prevSessIds.add(s.session_id);
+    }
+    prevTotals.sessions = prevSessIds.size;
+    prevTotals.cost = prevDaily.reduce(
+      (acc, r) => acc + calcCost(r.model, r.input, r.output, r.cache_read, r.cache_creation),
+      0,
+    );
+  }
+
   const hourlySrc = (rawData.hourly_by_model || []).filter(r =>
     selectedModels.has(r.model) && (!start || r.day >= start) && (!end || r.day <= end)
   );
   const hourlyAgg = aggregateHourly(hourlySrc, hourlyTZ);
 
-  // Update daily chart title
-  document.getElementById('daily-chart-title').textContent = 'Daily Token Usage \u2014 ' + RANGE_LABELS[selectedRange];
-  document.getElementById('hourly-chart-title').textContent = 'Average Hourly Distribution \u2014 ' + RANGE_LABELS[selectedRange];
+  return {
+    range, start, end,
+    totals, prevTotals,
+    daily, byModel, byProject, byProjectBranch,
+    filteredSessions, hourlyAgg,
+  };
+}
 
   renderStats(totals, prevTotals);
   renderStats(totals);
@@ -3116,6 +3236,64 @@ function applyFilter() {
   renderProjectBranchCostTable(lastByProjectBranch.slice(0, 20));
   renderBranchOnlyCostTable(lastByBranch.slice(0, 20));
   renderCache1hOpportunities(rawData.cache_1h_opportunities || []);
+// applyFilter — single entry point used by every onChange in the UI. In the
+// default case it computes one period (selectedRange). In compare-mode it
+// computes both periods and hands the diff data to the dual renderers.
+function applyFilter() {
+  if (!rawData) return;
+
+  const pa = computePeriod(selectedRange);
+  const pb = compareMode ? computePeriod(selectedRangeB) : null;
+
+  // Titles include both labels in compare mode.
+  const titleSuffix = compareMode
+    ? RANGE_LABELS[selectedRange] + ' vs ' + RANGE_LABELS[selectedRangeB]
+    : RANGE_LABELS[selectedRange];
+  document.getElementById('daily-chart-title').textContent  = 'Daily Token Usage — ' + titleSuffix;
+  document.getElementById('hourly-chart-title').textContent = 'Average Hourly Distribution — ' + RANGE_LABELS[selectedRange];
+
+  if (compareMode && pb) {
+    renderStatsAB(pa.totals, pb.totals);
+    renderDailyChartAB(pa.daily, pb.daily);
+    renderModelChart(pa.byModel);
+    renderProjectChart(pa.byProject);
+    renderHourlyChart(pa.hourlyAgg);
+    renderPareto(pa.filteredSessions);
+    renderModelCostTableAB(pa.byModel, pb.byModel);
+    renderProjectCostTableAB(pa.byProject, pb.byProject);
+    renderProjectBranchCostTable(sortProjectBranch(pa.byProjectBranch).slice(0, 20));
+    // Sessions: union, colour-coded by period membership.
+    const ids = new Map();
+    for (const s of pa.filteredSessions) ids.set(s.session_id_full, 'period-a');
+    for (const s of pb.filteredSessions) {
+      ids.set(s.session_id_full, ids.has(s.session_id_full) ? 'period-ab' : 'period-b');
+    }
+    const seen = new Set();
+    const union = [];
+    for (const s of pa.filteredSessions.concat(pb.filteredSessions)) {
+      if (seen.has(s.session_id_full)) continue;
+      seen.add(s.session_id_full);
+      union.push(Object.assign({}, s, { _abClass: ids.get(s.session_id_full) }));
+    }
+    lastFilteredSessions = sortSessions(union);
+    lastByProject = sortProjects(pa.byProject);
+    lastByProjectBranch = sortProjectBranch(pa.byProjectBranch);
+    renderSessionsTable(lastFilteredSessions.slice(0, 20));
+  } else {
+    renderStats(pa.totals, pa.prevTotals);
+    renderDailyChart(pa.daily);
+    renderHourlyChart(pa.hourlyAgg);
+    renderModelChart(pa.byModel);
+    renderProjectChart(pa.byProject);
+    renderPareto(lastFilteredSessions || pa.filteredSessions);
+    lastFilteredSessions = sortSessions(pa.filteredSessions);
+    lastByProject = sortProjects(pa.byProject);
+    lastByProjectBranch = sortProjectBranch(pa.byProjectBranch);
+    renderSessionsTable(lastFilteredSessions.slice(0, 20));
+    renderModelCostTable(pa.byModel);
+    renderProjectCostTable(lastByProject.slice(0, 20));
+    renderProjectBranchCostTable(lastByProjectBranch.slice(0, 20));
+  }
 
   const visibleSessions = lastFilteredSessions.slice(0, 20);
   if (!visibleSessions.length) {
@@ -3262,6 +3440,130 @@ function forecastColor() {
   const f = _f();
   if (!f) return '';
   return f.trend === 'up' ? '#f87171' : f.trend === 'down' ? '#4ade80' : '';
+// ── A/B compare renderers ───────────────────────────────────────────────
+// Tiny helpers — keep delta math in one place so stats cards, model table,
+// and project table all format the same way.
+function _abPct(a, b) {
+  if (b == null) return null;
+  if (b === 0) return a > 0 ? Infinity : 0;
+  return ((a - b) / b) * 100;
+}
+function _abPctLabel(a, b) {
+  const p = _abPct(a, b);
+  if (p == null) return '';
+  if (p === Infinity) return ' <span class="delta delta-up">new</span>';
+  if (Math.abs(p) < 1) return ' <span class="delta">~</span>';
+  const cls = p > 0 ? 'delta-up' : 'delta-down';
+  const sign = p > 0 ? '+' : '';
+  return ' <span class="delta ' + cls + '">' + sign + p.toFixed(0) + '%</span>';
+}
+
+function renderStatsAB(a, b) {
+  const labelA = RANGE_LABELS[selectedRange];
+  const labelB = RANGE_LABELS[selectedRangeB];
+  const cards = [
+    { label: 'Sessions',       fmt: v => v.toLocaleString(), aVal: a.sessions,       bVal: b.sessions },
+    { label: 'Turns',          fmt: fmt,                     aVal: a.turns,          bVal: b.turns },
+    { label: 'Input Tokens',   fmt: fmt,                     aVal: a.input,          bVal: b.input },
+    { label: 'Output Tokens',  fmt: fmt,                     aVal: a.output,         bVal: b.output },
+    { label: 'Cache Read',     fmt: fmt,                     aVal: a.cache_read,     bVal: b.cache_read },
+    { label: 'Cache Creation', fmt: fmt,                     aVal: a.cache_creation, bVal: b.cache_creation },
+    { label: 'Est. Cost',      fmt: fmtCostBig,              aVal: a.cost,           bVal: b.cost, color: '#4ade80' },
+  ];
+  document.getElementById('stats-row').innerHTML = cards.map(c => `
+    <div class="stat-card">
+      <div class="label">${c.label}${_abPctLabel(c.aVal, c.bVal)}</div>
+      <div class="ab-stat">
+        <div class="ab-stat-row"><span><span class="ab-tag ab-tag-a">A</span>${esc(labelA)}</span><span class="ab-cell" style="${c.color ? 'color:' + c.color : ''}">${esc(c.fmt(c.aVal))}</span></div>
+        <div class="ab-stat-row"><span><span class="ab-tag ab-tag-b">B</span>${esc(labelB)}</span><span class="ab-cell muted">${esc(c.fmt(c.bVal))}</span></div>
+      </div>
+    </div>
+  `).join('');
+}
+
+// Daily chart in compare mode — overlay both periods on the same x axis as
+// "Day 1 of period", "Day 2 of period", etc. so windows of different lengths
+// can still be visually compared.
+function renderDailyChartAB(dailyA, dailyB) {
+  const ctx = document.getElementById('chart-daily').getContext('2d');
+  if (charts.daily) charts.daily.destroy();
+  const len = Math.max(dailyA.length, dailyB.length);
+  const labels = [];
+  for (let i = 0; i < len; i++) labels.push('Day ' + (i + 1));
+  const sumTokens = d => d.input + d.output + d.cache_read + d.cache_creation;
+  const dataA = dailyA.map(sumTokens);
+  const dataB = dailyB.map(sumTokens);
+  while (dataA.length < len) dataA.push(0);
+  while (dataB.length < len) dataB.push(0);
+  charts.daily = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: labels,
+      datasets: [
+        { label: 'A · ' + RANGE_LABELS[selectedRange],  data: dataA, backgroundColor: 'rgba(0,113,227,0.75)' },
+        { label: 'B · ' + RANGE_LABELS[selectedRangeB], data: dataB, backgroundColor: 'rgba(245,158,11,0.75)' },
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { labels: { color: chartColors().label, boxWidth: 12 } } },
+      scales: {
+        x: { ticks: { color: chartColors().label, maxTicksLimit: 15 }, grid: { color: chartColors().grid } },
+        y: { ticks: { color: chartColors().label, callback: v => fmt(v) }, grid: { color: chartColors().grid } },
+      }
+    }
+  });
+}
+
+function renderModelCostTableAB(byModelA, byModelB) {
+  const bIndex = new Map();
+  for (const m of byModelB) bIndex.set(m.model, m);
+  const allKeys = new Set([...byModelA.map(m => m.model), ...byModelB.map(m => m.model)]);
+  const rows = [];
+  for (const key of allKeys) {
+    const a = byModelA.find(m => m.model === key) || { model: key, input: 0, output: 0, cache_read: 0, cache_creation: 0, turns: 0, cache_1h: 0 };
+    const b = bIndex.get(key)                    || { model: key, input: 0, output: 0, cache_read: 0, cache_creation: 0, turns: 0, cache_1h: 0 };
+    const ca = calcCost(a.model, a.input, a.output, a.cache_read, a.cache_creation, a.cache_1h);
+    const cb = calcCost(b.model, b.input, b.output, b.cache_read, b.cache_creation, b.cache_1h);
+    rows.push({ model: key, a, b, ca, cb });
+  }
+  rows.sort((x, y) => (y.ca + y.cb) - (x.ca + x.cb));
+  document.getElementById('model-cost-body').innerHTML = rows.map(r => {
+    const costCellA = isBillable(r.model) ? fmtCost(r.ca) : '<span class="muted">n/a</span>';
+    const costCellB = isBillable(r.model) ? fmtCost(r.cb) : '<span class="muted">n/a</span>';
+    return `<tr>
+      <td><span class="model-tag">${esc(r.model)}</span></td>
+      <td class="num"><span class="ab-tag ab-tag-a">A</span>${fmt(r.a.turns)}<br><span class="ab-tag ab-tag-b">B</span>${fmt(r.b.turns)}</td>
+      <td class="num"><span class="ab-tag ab-tag-a">A</span>${fmt(r.a.input)}<br><span class="ab-tag ab-tag-b">B</span>${fmt(r.b.input)}</td>
+      <td class="num"><span class="ab-tag ab-tag-a">A</span>${fmt(r.a.output)}<br><span class="ab-tag ab-tag-b">B</span>${fmt(r.b.output)}</td>
+      <td class="num hide-mobile"><span class="ab-tag ab-tag-a">A</span>${fmt(r.a.cache_read)}<br><span class="ab-tag ab-tag-b">B</span>${fmt(r.b.cache_read)}</td>
+      <td class="num hide-mobile"><span class="ab-tag ab-tag-a">A</span>${fmt(r.a.cache_creation)}<br><span class="ab-tag ab-tag-b">B</span>${fmt(r.b.cache_creation)}</td>
+      <td class="cost"><span class="ab-tag ab-tag-a">A</span>${costCellA}<br><span class="ab-tag ab-tag-b">B</span>${costCellB}${_abPctLabel(r.ca, r.cb)}</td>
+    </tr>`;
+  }).join('');
+}
+
+function renderProjectCostTableAB(byProjectA, byProjectB) {
+  const aIdx = new Map();  for (const p of byProjectA) aIdx.set(p.project, p);
+  const bIdx = new Map();  for (const p of byProjectB) bIdx.set(p.project, p);
+  const keys = new Set([...aIdx.keys(), ...bIdx.keys()]);
+  const rows = [];
+  for (const k of keys) {
+    const a = aIdx.get(k) || { project: k, sessions: 0, turns: 0, input: 0, output: 0, cost: 0 };
+    const b = bIdx.get(k) || { project: k, sessions: 0, turns: 0, input: 0, output: 0, cost: 0 };
+    rows.push({ project: k, a, b });
+  }
+  rows.sort((x, y) => (y.a.cost + y.b.cost) - (x.a.cost + x.b.cost));
+  document.getElementById('project-cost-body').innerHTML = rows.slice(0, 20).map(r => `
+    <tr>
+      <td>${esc(r.project)}</td>
+      <td class="num"><span class="ab-tag ab-tag-a">A</span>${r.a.sessions}<br><span class="ab-tag ab-tag-b">B</span>${r.b.sessions}</td>
+      <td class="num"><span class="ab-tag ab-tag-a">A</span>${fmt(r.a.turns)}<br><span class="ab-tag ab-tag-b">B</span>${fmt(r.b.turns)}</td>
+      <td class="num"><span class="ab-tag ab-tag-a">A</span>${fmt(r.a.input)}<br><span class="ab-tag ab-tag-b">B</span>${fmt(r.b.input)}</td>
+      <td class="num"><span class="ab-tag ab-tag-a">A</span>${fmt(r.a.output)}<br><span class="ab-tag ab-tag-b">B</span>${fmt(r.b.output)}</td>
+      <td class="cost"><span class="ab-tag ab-tag-a">A</span>${fmtCost(r.a.cost)}<br><span class="ab-tag ab-tag-b">B</span>${fmtCost(r.b.cost)}${_abPctLabel(r.a.cost, r.b.cost)}</td>
+    </tr>
+  `).join('');
 }
 
 function renderStats(t, prev) {
@@ -3872,6 +4174,7 @@ function renderSessionsTable(sessions) {
       ? `<td><span class="session-name">${esc(s.session_name)}</span> <span class="muted" style="font-family:monospace">(${esc(s.session_id)}&hellip;)</span>${badge}</td>`
       : `<td class="muted" style="font-family:monospace">${esc(s.session_id)}&hellip;${badge}</td>`;
     return `<tr class="session-row ${selectedSessionId === s.session_id_full ? 'selected' : ''}" data-session-id="${esc(s.session_id_full)}">
+    return `<tr class="session-row ${s._abClass || ''} ${selectedSessionId === s.session_id_full ? 'selected' : ''}" data-session-id="${esc(s.session_id_full)}">
       ${sessionCell}
       <td>${projCellHTML(s.project)}</td>
       <td class="muted">${esc(s.last)}</td>
@@ -4329,6 +4632,7 @@ function loadData() {
       updateModelSortIcons();
       updateProjectSortIcons();
       updateProjectBranchSortIcons();
+      updateCompareUI();
     }
 
     renderGitTraceCard(d.git_trace_recent || []);
