@@ -282,6 +282,50 @@ python3 cli.py completions zsh > ~/.zsh/completions/_claude-usage
 python3 cli.py completions fish > ~/.config/fish/completions/claude-usage.fish
 ```
 
+## macOS automation
+
+The dashboard exposes a handful of single-number text endpoints so you can
+wire usage stats into AppleScript, SwiftBar / xbar, Hammerspoon,
+BetterTouchTool, Ubersicht, or a plain `cron + curl + mail` pipeline
+without parsing JSON.
+
+| Endpoint | Example response |
+|---|---|
+| `GET /api/text/today-cost`      | `12.34` |
+| `GET /api/text/month-cost`      | `287.65` |
+| `GET /api/text/active-sessions` | `2` |
+| `GET /api/text/budget-pct`      | `73` (needs `CLAUDE_USAGE_MONTHLY_BUDGET=<usd>`, else `0`) |
+
+Responses are `text/plain`, no trailing newline, ASCII only. "Active" means a
+session whose last turn was within the last 5 hours (Claude Code's rate
+window). Costs are USD computed from the same `pricing.py` table the
+dashboard uses.
+
+```sh
+$ curl -s http://localhost:8080/api/text/today-cost
+12.34
+$ curl -s http://localhost:8080/api/text/active-sessions
+2
+```
+
+Sample AppleScripts live in [`scripts/applescript/`](scripts/applescript/):
+
+- `today-cost.applescript` - fetches today's cost and posts a notification.
+  Run from Automator, a Calendar alarm, or launchd for a daily recap.
+- `menubar-update.applescript` - emits `$today | $month | N active` on
+  stdout. Drop into SwiftBar as `menubar-update.30s.applescript`, or call
+  from Hammerspoon's `hs.menubar:setTitle()` on a timer.
+
+```sh
+$ osascript scripts/applescript/today-cost.applescript
+$ osascript scripts/applescript/menubar-update.applescript
+$12.34 | $287.65 | 2 active
+```
+
+The endpoints are also handy outside macOS - any HTTP+text consumer works,
+so a `cron` job that pipes `curl` into `mail` gives you a daily spend
+email without writing any code.
+
 ## Files
 
 | File | Purpose |
@@ -353,3 +397,4 @@ node types (`Compare`, `BoolOp`, `Name`, `Constant`, `UnaryOp`). There is
 function calls, attribute access, imports, and subscripts are all rejected.
 Shell actions run via `subprocess.run` with a 10s timeout; webhooks via
 `urllib.request` with a 10s timeout.
+| `scripts/applescript/` | Sample AppleScripts for the text endpoints (notification, menubar) |

@@ -71,6 +71,8 @@ from datetime import datetime, timedelta, date
 from pricing import PRICING, calc_cost, get_pricing
 from datetime import datetime
 from datetime import datetime, timedelta, date as _date_cls
+from pricing import PRICING, calc_cost
+from datetime import datetime, timedelta, timezone
 
 DB_PATH    = Path.home() / ".claude" / "usage.db"
 THEMES_DIR = Path.home() / ".claude" / "claude-usage" / "themes"
@@ -1808,6 +1810,68 @@ def get_dashboard_data(db_path=DB_PATH):
         "git_trace_recent": _load_git_trace(limit=50),
         "generated_at":     datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
+
+
+def get_text_stats(db_path=None, now=None):
+    """Return a flat dict of single-number stats for the AppleScript / text endpoints.
+
+    Keys: today_cost, month_cost, active_sessions, budget_pct.
+    All numeric, no nesting — kept boring so /api/text/* can stringify directly.
+
+    - Costs are in USD and computed per-model with ``calc_cost``.
+    - "active_sessions" = sessions whose last turn was within the last 5h
+      (Claude Code's rate-limit window — what "active" means in the UI).
+    - "budget_pct" reads ``CLAUDE_USAGE_MONTHLY_BUDGET`` (USD) from env; if unset
+      or 0, returns 0 so callers can render "n/a" without special-casing.
+    """
+    db_path = db_path or DB_PATH
+    now = now or datetime.now(timezone.utc)
+    today_iso = now.strftime("%Y-%m-%d")
+    month_iso = now.strftime("%Y-%m")
+    cutoff_iso = (now - timedelta(hours=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    result = {"today_cost": 0.0, "month_cost": 0.0, "active_sessions": 0, "budget_pct": 0}
+    if not db_path.exists():
+        return result
+
+    conn = sqlite3.connect(db_path)
+    try:
+        # Per-model token sums for today + month-to-date. Doing the cost math in
+        # Python (not SQL) keeps the single source of truth in pricing.calc_cost.
+        for day_filter, key in ((today_iso, "today_cost"), (month_iso, "month_cost")):
+            rows = conn.execute("""
+                SELECT COALESCE(NULLIF(model, ''), 'unknown') AS model,
+                       SUM(input_tokens)          AS inp,
+                       SUM(output_tokens)         AS out,
+                       SUM(cache_read_tokens)     AS cr,
+                       SUM(cache_creation_tokens) AS cc,
+                       SUM(COALESCE(cache_1h_tokens, 0)) AS c1h
+                FROM turns
+                WHERE substr(timestamp, 1, ?) = ?
+                GROUP BY model
+            """, (len(day_filter), day_filter)).fetchall()
+            total = 0.0
+            for model, inp, out, cr, cc, c1h in rows:
+                total += calc_cost(model, inp or 0, out or 0, cr or 0, cc or 0, cache_1h=c1h or 0)
+            result[key] = round(total, 2)
+
+        # Active = a session touched in the last 5h (Claude Code's rate window).
+        row = conn.execute(
+            "SELECT COUNT(*) FROM sessions WHERE last_timestamp >= ?",
+            (cutoff_iso,),
+        ).fetchone()
+        result["active_sessions"] = int(row[0] or 0)
+    finally:
+        conn.close()
+
+    try:
+        budget = float(os.environ.get("CLAUDE_USAGE_MONTHLY_BUDGET", "0") or 0)
+    except ValueError:
+        budget = 0.0
+    if budget > 0:
+        result["budget_pct"] = int(round(result["month_cost"] / budget * 100))
+
+    return result
 
 
 def get_session_detail(session_id, db_path=DB_PATH):
@@ -5502,6 +5566,27 @@ class DashboardHandler(BaseHTTPRequestHandler):
             body = json.dumps(manifest).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/manifest+json")
+        elif path.startswith("/api/text/"):
+            # Single-number text endpoints for osascript / SwiftBar / cron + curl.
+            # Always return a bare ASCII string with no trailing newline so
+            # `do shell script "curl ..."` in AppleScript yields a clean value.
+            stats = get_text_stats()
+            key_map = {
+                "/api/text/today-cost":      f"{stats['today_cost']:.2f}",
+                "/api/text/month-cost":      f"{stats['month_cost']:.2f}",
+                "/api/text/active-sessions": str(stats["active_sessions"]),
+                "/api/text/budget-pct":      str(stats["budget_pct"]),
+            }
+            value = key_map.get(path)
+            if value is None:
+                self.send_response(404)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(b"not found")
+                return
+            body = value.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
