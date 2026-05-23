@@ -130,6 +130,56 @@ def _pii_check(text, patterns):
             continue
     return matches
 
+DB_PATH        = Path.home() / ".claude" / "usage.db"
+THEMES_DIR     = Path.home() / ".claude" / "claude-usage" / "themes"
+GIT_TRACE_PATH = Path.home() / ".claude" / "git-trace.jsonl"
+
+
+def _load_git_trace(path=None, limit=50):
+    """Load the last `limit` commit records from the git-trace JSONL.
+
+    Each line is `{repo, sha, message, author, timestamp, session_id}`,
+    written by the bundled `post-commit` hook. Bad lines (corrupt JSON,
+    missing fields) are skipped silently — the trace is informational
+    and must never break /api/data.
+
+    Returns commits in reverse-chronological order (newest first).
+    """
+    path = Path(path) if path else GIT_TRACE_PATH
+    if not path.exists():
+        return []
+
+    records = []
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except (ValueError, json.JSONDecodeError):
+                    continue
+                # Minimum-viable record: must at least have sha + timestamp.
+                if not rec.get("sha") or not rec.get("timestamp"):
+                    continue
+                records.append({
+                    "repo":       rec.get("repo", ""),
+                    "sha":        rec["sha"],
+                    "short_sha":  rec["sha"][:8],
+                    "message":    rec.get("message", ""),
+                    "author":     rec.get("author", ""),
+                    "timestamp":  rec["timestamp"],
+                    "session_id": rec.get("session_id") or "",
+                })
+    except OSError:
+        return []
+
+    # Sort newest first by timestamp (lexicographic on ISO8601 works), then
+    # slice. We sort defensively because the file is append-only but a
+    # parallel commit could in theory land out-of-order across processes.
+    records.sort(key=lambda r: r["timestamp"], reverse=True)
+    return records[:limit]
 
 # ── Bundled themes ─────────────────────────────────────────────────────────────
 BUNDLED_THEMES = [
@@ -1502,6 +1552,12 @@ def get_dashboard_data(db_path=DB_PATH):
         "sessions_all":           sessions_all,
         "cache_1h_opportunities": cache_1h_opportunities,
         "generated_at":           datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "all_models":       all_models,
+        "daily_by_model":   daily_by_model,
+        "hourly_by_model":  hourly_by_model,
+        "sessions_all":     sessions_all,
+        "git_trace_recent": _load_git_trace(limit=50),
+        "generated_at":     datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
 
@@ -2112,6 +2168,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <div id="plan-card" style="display:none; margin:0 0 16px 0; padding:10px 14px; background:rgba(74,222,128,0.08); border-radius:8px; font-size:12px; color:var(--text);"></div>
     <div id="downgrade-card" style="display:none; margin: -8px 0 16px 0; padding: 10px 14px; background: rgba(74,222,128,0.10); border-radius: 8px; font-size: 12px; color: var(--text);"></div>
     <div id="cache-hit-card" style="display:none; margin: -4px 0 16px 0; padding: 10px 14px; background: rgba(94,106,210,0.08); border-radius: 8px; font-size: 12px; color: var(--text);"></div>
+    <div id="git-trace-card" style="display:none; margin: -8px 0 16px 0; padding: 12px 16px; background: rgba(76,175,80,0.08); border: 1px solid rgba(76,175,80,0.18); border-radius: 8px; font-size: 13px; color: var(--text);"></div>
   <div class="charts-grid">
     <div class="chart-card wide">
       <h2 id="daily-chart-title">Daily Token Usage</h2>
@@ -4120,9 +4177,82 @@ function loadData() {
       updateProjectBranchSortIcons();
     }
 
+    renderGitTraceCard(d.git_trace_recent || []);
     applyFilter();
   } catch(e) {
     console.error(e);
+  }
+}
+
+// ── Git-trace insight card ────────────────────────────────────────────────
+// Renders one line per top session that produced commits in the last 7 days.
+// Each session_id is linkified to the session detail panel by clicking the
+// matching row in the sessions table (we use the standard session_id-full
+// hash navigation).
+function renderGitTraceCard(commits) {
+  const el = document.getElementById('git-trace-card');
+  if (!el) return;
+  if (!Array.isArray(commits) || commits.length === 0) {
+    el.style.display = 'none';
+    return;
+  }
+  // 7-day window, newest first.
+  const cutoffMs = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  const recent = commits.filter(c => {
+    const t = Date.parse(c.timestamp);
+    return Number.isFinite(t) && t >= cutoffMs;
+  });
+  if (recent.length === 0) {
+    el.style.display = 'none';
+    return;
+  }
+  // Group by session_id (skip blank session_ids — they represent commits
+  // made outside an active Claude Code session).
+  const bySession = {};
+  for (const c of recent) {
+    if (!c.session_id) continue;
+    if (!bySession[c.session_id]) {
+      bySession[c.session_id] = { count: 0, latest: c };
+    }
+    bySession[c.session_id].count += 1;
+    if (c.timestamp > bySession[c.session_id].latest.timestamp) {
+      bySession[c.session_id].latest = c;
+    }
+  }
+  const topSessions = Object.entries(bySession)
+    .map(([sid, info]) => ({ sid, ...info }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 5);
+
+  // The "Sessions resulted in N commits..." headline counts unique sessions
+  // that produced at least one commit (so an attentive reader can sanity-
+  // check the top-N list against the total).
+  const sessionCount = Object.keys(bySession).length;
+  const totalCommits = recent.length;
+  const headline = `<strong>${sessionCount}</strong> session${sessionCount === 1 ? '' : 's'} produced <strong>${totalCommits}</strong> commit${totalCommits === 1 ? '' : 's'} in the last 7 days`;
+
+  let body = '';
+  if (topSessions.length) {
+    const items = topSessions.map(t => {
+      const shortSid = esc(t.sid.slice(0, 8));
+      const repoBase = (t.latest.repo || '').split('/').pop() || '(unknown repo)';
+      const msg = esc((t.latest.message || '').slice(0, 60));
+      return `<li style="margin: 4px 0;"><a href="#session-${esc(t.sid)}" onclick="selectSessionByFullId('${esc(t.sid)}'); return false;" style="color: var(--accent); text-decoration: none; font-family: monospace;">${shortSid}</a> &middot; ${t.count} commit${t.count === 1 ? '' : 's'} &middot; <span style="color: var(--muted)">${esc(repoBase)}</span> &middot; <em>${msg}</em></li>`;
+    }).join('');
+    body = `<ul style="margin: 6px 0 0 0; padding-left: 20px; list-style: disc;">${items}</ul>`;
+  }
+  el.innerHTML = `<div style="font-weight: 500; margin-bottom: 2px;">Git activity &middot; ${headline}</div>${body}`;
+  el.style.display = '';
+}
+
+// Tries to scroll the session detail row into view + click it. Falls back
+// to a no-op if the session isn't in the currently-filtered table (e.g.
+// older than the active range filter).
+function selectSessionByFullId(fullId) {
+  const row = document.querySelector(`tr.session-row[data-session-id="${fullId}"]`);
+  if (row) {
+    row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    row.click();
   }
 }
 

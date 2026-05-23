@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# claude-usage post-commit hook
+#
+# Appends one JSON record per commit to ~/.claude/git-trace.jsonl so the
+# dashboard can correlate Claude Code sessions with the commits they led to.
+#
+# Self-detects the session_id via three strategies, in order:
+#   1) $CLAUDE_SESSION_ID env var (set by the IDE plugin, if available)
+#   2) $CLAUDE_CODE_SESSION_ID env var (alias used by some integrations)
+#   3) Most-recently-modified .jsonl under ~/.claude/projects/ within the
+#      last 10 minutes (best-effort fallback for plain CLI sessions)
+#
+# Install via:   python3 cli.py install-git-hook            (per-repo)
+#       or:     python3 cli.py install-git-hook --global    (all repos)
+#
+# This script is intentionally dependency-free (POSIX tools + bash). It is
+# safe to run outside a git repo (it exits silently).
+
+set -u
+
+if ! command -v git >/dev/null 2>&1; then
+    exit 0
+fi
+
+REPO="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+if [ -z "${REPO}" ]; then
+    exit 0
+fi
+
+SHA="$(git rev-parse HEAD 2>/dev/null || true)"
+if [ -z "${SHA}" ]; then
+    exit 0
+fi
+
+SUBJECT="$(git log -1 --pretty=%s 2>/dev/null || true)"
+AUTHOR="$(git log -1 --pretty=%an 2>/dev/null || true)"
+
+# RFC3339 / ISO8601 UTC timestamp. `date -u +%FT%TZ` is portable across
+# GNU coreutils and BSD/macOS date.
+TS="$(date -u +%FT%TZ)"
+
+# Resolve session id ────────────────────────────────────────────────────────
+SESSION_ID="${CLAUDE_SESSION_ID:-${CLAUDE_CODE_SESSION_ID:-}}"
+
+if [ -z "${SESSION_ID}" ]; then
+    # Best-effort: pick the JSONL transcript most recently touched within
+    # the last 10 minutes. We deliberately bound the lookback so a commit
+    # made *outside* an active session isn't mis-attributed.
+    PROJECTS_DIR="${CLAUDE_PROJECTS_DIR:-${HOME}/.claude/projects}"
+    if [ -d "${PROJECTS_DIR}" ]; then
+        # Find newest .jsonl mtime within 10 minutes. `-mmin -10` works on
+        # both GNU and BSD find. We then sort by mtime (newest first).
+        RECENT="$(find "${PROJECTS_DIR}" -type f -name '*.jsonl' -mmin -10 2>/dev/null \
+            | while read -r f; do
+                # Print "<mtime>\t<path>" without depending on stat's flag
+                # syntax (which differs between GNU and BSD).
+                mt="$(perl -e 'print((stat($ARGV[0]))[9])' "$f" 2>/dev/null || echo 0)"
+                printf '%s\t%s\n' "$mt" "$f"
+              done \
+            | sort -rn | head -n 1 | cut -f2-)"
+        if [ -n "${RECENT}" ]; then
+            # JSONL filenames are <session-uuid>.jsonl, so strip the dir
+            # and the extension.
+            base="$(basename "${RECENT}" .jsonl)"
+            SESSION_ID="${base}"
+        fi
+    fi
+fi
+
+# Escape a string for embedding in a JSON value.
+json_escape() {
+    # Replace backslash, quote, control chars. printf preserves bytes.
+    printf '%s' "$1" | python3 -c '
+import json, sys
+sys.stdout.write(json.dumps(sys.stdin.read()))
+' 2>/dev/null || {
+        # Fallback if python3 is unavailable: minimal escaping. Good
+        # enough for SHA/author/timestamp (rare control chars).
+        s="$1"
+        s="${s//\\/\\\\}"
+        s="${s//\"/\\\"}"
+        s="${s//$'\n'/\\n}"
+        s="${s//$'\t'/\\t}"
+        printf '"%s"' "$s"
+    }
+}
+
+OUT_DIR="${CLAUDE_TRACE_DIR:-${HOME}/.claude}"
+OUT_FILE="${OUT_DIR}/git-trace.jsonl"
+mkdir -p "${OUT_DIR}"
+
+# Build JSON record. Each field individually escaped → safe against quotes,
+# newlines, and backslashes in commit subjects / author names.
+record="{\"repo\":$(json_escape "${REPO}"),\
+\"sha\":$(json_escape "${SHA}"),\
+\"message\":$(json_escape "${SUBJECT}"),\
+\"author\":$(json_escape "${AUTHOR}"),\
+\"timestamp\":$(json_escape "${TS}"),\
+\"session_id\":$(json_escape "${SESSION_ID}")}"
+
+# Append atomically. `>>` on a single line is line-atomic on POSIX file
+# systems for writes up to PIPE_BUF (4 KB), which a one-line record fits.
+printf '%s\n' "${record}" >> "${OUT_FILE}"
+
+# Never block the commit. Exit 0 even on partial failure.
+exit 0

@@ -2,13 +2,16 @@
 cli.py - Command-line interface for the Claude Code usage dashboard.
 
 Commands:
-  scan      - Scan JSONL files and update the database
-  today     - Print today's usage summary
-  stats     - Print all-time usage statistics
-  dashboard - Scan + open browser + start dashboard server
+  scan              - Scan JSONL files and update the database
+  today             - Print today's usage summary
+  stats             - Print all-time usage statistics
+  dashboard         - Scan + open browser + start dashboard server
+  install-git-hook  - Install the post-commit hook that traces commits
 """
 
 import os
+import shutil
+import subprocess
 import sys
 import json
 import sqlite3
@@ -1097,6 +1100,84 @@ def cmd_completions(shell=_COMPLETIONS_SENTINEL):
             file=sys.stderr,
         )
         sys.exit(2)
+# ── install-git-hook ──────────────────────────────────────────────────────────
+
+HOOK_SCRIPT_NAME = "post-commit"
+
+
+def _hooks_source_path():
+    """Path to the bundled hook script shipped alongside cli.py."""
+    return Path(__file__).resolve().parent / "hooks" / HOOK_SCRIPT_NAME
+
+
+def cmd_install_git_hook():
+    """Install the post-commit hook that traces commits to ~/.claude/git-trace.jsonl.
+
+    Default scope is the current repository (`git config --local core.hooksPath`).
+    Pass --global to install to ~/.git-hooks/ and set the user's global
+    `core.hooksPath`, so every repo on this machine emits trace records.
+    """
+    args = sys.argv[2:]
+    is_global = "--global" in args
+
+    src = _hooks_source_path()
+    if not src.exists():
+        print(f"Error: bundled hook script not found at {src}", file=sys.stderr)
+        sys.exit(1)
+
+    if is_global:
+        hooks_dir = Path.home() / ".git-hooks"
+        hooks_dir.mkdir(parents=True, exist_ok=True)
+        dest = hooks_dir / HOOK_SCRIPT_NAME
+        shutil.copy2(src, dest)
+        os.chmod(dest, 0o755)
+        # Set the user's global hooksPath so the script fires for every
+        # repo (without rewriting per-repo configs).
+        try:
+            subprocess.run(
+                ["git", "config", "--global", "core.hooksPath", str(hooks_dir)],
+                check=True,
+            )
+        except (subprocess.CalledProcessError, FileNotFoundError) as e:
+            print(f"Installed hook to {dest} but failed to set git config: {e}",
+                  file=sys.stderr)
+            sys.exit(1)
+        print(f"Installed global post-commit hook to {dest}")
+        print(f"Set global core.hooksPath = {hooks_dir}")
+        print("Every commit (in any repo) will now append to ~/.claude/git-trace.jsonl")
+        return
+
+    # Per-repo install: stage hook under <repo>/.claude-usage-hooks/ and
+    # point core.hooksPath at it. We deliberately don't drop the file into
+    # .git/hooks/ so it survives `git clean` and is visible to the user.
+    try:
+        repo_root = subprocess.check_output(
+            ["git", "rev-parse", "--show-toplevel"],
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print("Not inside a git repository. Run this from a repo, or use --global.",
+              file=sys.stderr)
+        sys.exit(1)
+
+    hooks_dir = Path(repo_root) / ".claude-usage-hooks"
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+    dest = hooks_dir / HOOK_SCRIPT_NAME
+    shutil.copy2(src, dest)
+    os.chmod(dest, 0o755)
+    try:
+        subprocess.run(
+            ["git", "-C", repo_root, "config", "--local",
+             "core.hooksPath", str(hooks_dir)],
+            check=True,
+        )
+    except subprocess.CalledProcessError as e:
+        print(f"Installed hook to {dest} but failed to set git config: {e}",
+              file=sys.stderr)
+        sys.exit(1)
+    print(f"Installed post-commit hook to {dest}")
+    print(f"Set repo-local core.hooksPath = {hooks_dir}")
+    print("Commits in this repo will now append to ~/.claude/git-trace.jsonl")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -1115,6 +1196,7 @@ Usage:
                                                  Generate a Markdown usage report
   python3 cli.py theme <list|add|remove>          Manage UI themes
   python3 cli.py completions <bash|zsh|fish>      Print shell tab-completion script
+  python3 cli.py install-git-hook [--global]      Install post-commit hook (commit -> session trace)
 """
 
 COMMANDS = {
@@ -1130,6 +1212,7 @@ COMMANDS = {
     "report": cmd_report,
     "theme": cmd_theme,
     "completions": cmd_completions,
+    "install-git-hook": cmd_install_git_hook,
 }
 
 def parse_named_arg(args, flag):
@@ -1150,6 +1233,8 @@ if __name__ == "__main__":
 
     if command == "theme":
         cmd_theme()
+    elif command == "install-git-hook":
+        cmd_install_git_hook()
     elif command == "dashboard":
         cmd_dashboard(
             projects_dir=projects_dir,
