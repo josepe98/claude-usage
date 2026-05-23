@@ -373,6 +373,51 @@ def _daily_cost_history(conn, days_back=60):
     return sorted(by_day.values(), key=lambda x: x["day"])
 
 
+def _anomaly_check(conn, threshold_sigma=2.0):
+    """Detect spend spikes. Returns dict with today/avg/sigma/is_anomalous."""
+    from pricing import get_pricing
+    from datetime import date as _date, timedelta as _td
+    today = _date.today().strftime("%Y-%m-%d")
+    cutoff = (_date.today() - _td(days=30)).strftime("%Y-%m-%d")
+    rows = conn.execute("""
+        SELECT date(timestamp) as day, model,
+               SUM(input_tokens) as inp, SUM(output_tokens) as out,
+               SUM(cache_read_tokens) as cr, SUM(cache_creation_tokens) as cw
+        FROM turns
+        WHERE timestamp IS NOT NULL AND date(timestamp) >= ?
+        GROUP BY day, model
+    """, (cutoff,)).fetchall()
+    by_day = {}
+    for r in rows:
+        p = get_pricing(r["model"])
+        if not p:
+            continue
+        c = ((r["inp"] or 0) * p["input"]
+             + (r["out"] or 0) * p["output"]
+             + (r["cr"] or 0) * p["cache_read"]
+             + (r["cw"] or 0) * p["cache_write"]) / 1_000_000
+        by_day[r["day"]] = by_day.get(r["day"], 0.0) + c
+    if not by_day:
+        return {"is_anomalous": False, "reason": "no data"}
+    today_spend = by_day.get(today, 0.0)
+    history = [v for d, v in by_day.items() if d != today]
+    if len(history) < 7:
+        return {"is_anomalous": False, "reason": "not enough history",
+                "today": round(today_spend, 2)}
+    mean = sum(history) / len(history)
+    var = sum((v - mean) ** 2 for v in history) / len(history)
+    sigma = var ** 0.5
+    is_anomalous = today_spend > mean + threshold_sigma * sigma and today_spend > 2 * mean
+    return {
+        "is_anomalous": is_anomalous,
+        "today": round(today_spend, 2),
+        "mean": round(mean, 2),
+        "sigma": round(sigma, 2),
+        "ratio": round(today_spend / mean, 2) if mean > 0 else None,
+        "threshold_sigma": threshold_sigma,
+    }
+
+
 def _forecast(history):
     """Simple lagging-average forecast. Returns dict with avg_7d, avg_30d,
     projected_month_end, trend ('up'|'down'|'flat')."""
@@ -621,6 +666,7 @@ def get_dashboard_data(db_path=DB_PATH):
                               + (r["cw"] or 0) * p["cache_write"]) / 1_000_000
     budget_status_data = _budget_status(month_to_date_usd)
 
+    anomaly = _anomaly_check(conn)
     conn.close()
 
     return {
@@ -632,6 +678,7 @@ def get_dashboard_data(db_path=DB_PATH):
         "tools_daily":     tools_daily,
         "forecast":        forecast,
         "budget":          budget_status_data,
+        "anomaly":         anomaly,
         "generated_at":    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
@@ -1222,6 +1269,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <div class="stats-row" id="stats-row"></div>
     <div id="pareto-card" style="display:none; margin: -8px 0 16px 0; padding: 10px 14px; background: rgba(217,119,87,0.08); border-radius: 8px; font-size: 12px; color: var(--text);"></div>
   <div id="budget-bar" style="display:none; margin:0 0 16px 0;"><div style="display:flex; justify-content:space-between; align-items:baseline; margin-bottom:6px;"><div style="font-size:12px; color:var(--muted);">Monthly budget <span id="budget-label"></span></div><div style="font-size:11px; color:var(--muted);"><a href="#" onclick="_editBudget(); return false;" style="color:var(--muted); text-decoration:underline;">edit</a></div></div><div id="budget-track" style="height:6px; background:rgba(255,255,255,0.08); border-radius:3px; overflow:hidden;"><div id="budget-fill" style="height:100%; background:#4ade80; transition: width 0.3s, background-color 0.3s;"></div></div></div>
+  <div id="anomaly-banner" style="display:none; padding:10px 14px; margin: 0 0 12px 0; background:rgba(248,113,113,0.12); border-left:3px solid #f87171; border-radius:6px; color:#f87171; font-size:13px;"></div>
     <div class="stats-row" id="stats-row"></div>
   <div class="charts-grid">
     <div class="chart-card wide">
@@ -1940,6 +1988,7 @@ function applyFilter() {
     (!start || r.day >= start) && (!end || r.day <= end)
   );
   renderToolsChart(filteredTools);
+  renderAnomalyBanner();
   lastFilteredSessions = sortSessions(filteredSessions);
   lastByProject = sortProjects(byProject);
   lastByProjectBranch = sortProjectBranch(byProjectBranch);
@@ -2454,6 +2503,15 @@ function _matchesSearch(s) {
   if (!_searchTerm) return true;
   const fields = [s.project, s.branch, s.session_id, s.session_name, s.model].filter(Boolean);
   return fields.some(f => String(f).toLowerCase().includes(_searchTerm));
+function renderAnomalyBanner() {  // eslint-disable-line no-unused-vars
+  const a = rawData && rawData.anomaly;
+  const el = document.getElementById("anomaly-banner");
+  if (!el || !a || !a.is_anomalous) {
+    if (el) el.style.display = "none";
+    return;
+  }
+  el.style.display = "";
+  el.innerHTML = \`⚠ <strong>Spend spike detected.</strong> Today's spend ($\${a.today.toFixed(2)}) is \${a.ratio}x the 30-day average ($\${a.mean.toFixed(2)}). Did an agent loop go haywire?\`;
 }
 
 function renderProjectChart(byProject) {
