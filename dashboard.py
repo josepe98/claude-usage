@@ -207,7 +207,8 @@ def get_dashboard_data(db_path=DB_PATH):
         "input":          r["input"] or 0,
         "output":         r["output"] or 0,
         "cache_read":     r["cache_read"] or 0,
-        "cache_creation": r["cache_creation"], "cache_1h": r["cache_1h"] or 0,
+        "cache_creation": r["cache_creation"] or 0,
+        "cache_1h":       r["cache_1h"] or 0,
         "turns":          r["turns"] or 0,
     } for r in daily_rows]
 
@@ -873,7 +874,7 @@ function getPricing(model) {
   return null;
 }
 
-function calcCost(model, inp, out, cacheRead, cacheCreation) {
+function calcCost(model, inp, out, cacheRead, cacheCreation, cache1h = 0) {
   if (!isBillable(model)) return 0;
   const p = getPricing(model);
   if (!p) return 0;
@@ -1069,8 +1070,8 @@ function sortSessions(sessions) {
   return [...sessions].sort((a, b) => {
     let av, bv;
     if (sessionSortCol === 'cost') {
-      av = calcCost(a.model, a.input, a.output, a.cache_read, a.cache_creation);
-      bv = calcCost(b.model, b.input, b.output, b.cache_read, b.cache_creation);
+      av = calcCost(a.model, a.input, a.output, a.cache_read, a.cache_creation, a.cache_1h);
+      bv = calcCost(b.model, b.input, b.output, b.cache_read, b.cache_creation, b.cache_1h);
     } else if (sessionSortCol === 'duration_min') {
       av = parseFloat(a.duration_min) || 0;
       bv = parseFloat(b.duration_min) || 0;
@@ -1142,7 +1143,7 @@ function applyFilter() {
     p.cache_creation += s.cache_creation;
     p.turns          += s.turns;
     p.sessions++;
-    p.cost += calcCost(s.model, s.input, s.output, s.cache_read, s.cache_creation);
+    p.cost += calcCost(s.model, s.input, s.output, s.cache_read, s.cache_creation, s.cache_1h);
   }
   const byProject = Object.values(projMap).sort((a, b) => (b.input + b.output) - (a.input + a.output));
 
@@ -1158,7 +1159,7 @@ function applyFilter() {
     pb.cache_creation += s.cache_creation;
     pb.turns          += s.turns;
     pb.sessions++;
-    pb.cost += calcCost(s.model, s.input, s.output, s.cache_read, s.cache_creation);
+    pb.cost += calcCost(s.model, s.input, s.output, s.cache_read, s.cache_creation, s.cache_1h);
   }
   const byProjectBranch = Object.values(projBranchMap).sort((a, b) => b.cost - a.cost);
 
@@ -1170,7 +1171,7 @@ function applyFilter() {
     output:         byModel.reduce((s, m) => s + m.output, 0),
     cache_read:     byModel.reduce((s, m) => s + m.cache_read, 0),
     cache_creation: byModel.reduce((s, m) => s + m.cache_creation, 0),
-    cost:           byModel.reduce((s, m) => s + calcCost(m.model, m.input, m.output, m.cache_read, m.cache_creation), 0),
+    cost:           byModel.reduce((s, m) => s + calcCost(m.model, m.input, m.output, m.cache_read, m.cache_creation, m.cache_1h), 0),
   };
 
   // Hourly aggregation (filtered by model + range, then bucketed by UTC hour)
@@ -1388,7 +1389,7 @@ function renderProjectChart(byProject) {
 
 function renderSessionsTable(sessions) {
   document.getElementById('sessions-body').innerHTML = sessions.map(s => {
-    const cost = calcCost(s.model, s.input, s.output, s.cache_read, s.cache_creation);
+    const cost = calcCost(s.model, s.input, s.output, s.cache_read, s.cache_creation, s.cache_1h);
     const costCell = isBillable(s.model)
       ? `<td class="cost">${fmtCost(cost)}</td>`
       : `<td class="cost-na">n/a</td>`;
@@ -1430,8 +1431,8 @@ function sortModels(byModel) {
   return [...byModel].sort((a, b) => {
     let av, bv;
     if (modelSortCol === 'cost') {
-      av = calcCost(a.model, a.input, a.output, a.cache_read, a.cache_creation);
-      bv = calcCost(b.model, b.input, b.output, b.cache_read, b.cache_creation);
+      av = calcCost(a.model, a.input, a.output, a.cache_read, a.cache_creation, a.cache_1h);
+      bv = calcCost(b.model, b.input, b.output, b.cache_read, b.cache_creation, b.cache_1h);
     } else {
       av = a[modelSortCol] ?? 0;
       bv = b[modelSortCol] ?? 0;
@@ -1444,7 +1445,7 @@ function sortModels(byModel) {
 
 function renderModelCostTable(byModel) {
   document.getElementById('model-cost-body').innerHTML = sortModels(byModel).map(m => {
-    const cost = calcCost(m.model, m.input, m.output, m.cache_read, m.cache_creation);
+    const cost = calcCost(m.model, m.input, m.output, m.cache_read, m.cache_creation, m.cache_1h);
     const costCell = isBillable(m.model)
       ? `<td class="cost">${fmtCost(cost)}</td>`
       : `<td class="cost-na">n/a</td>`;
@@ -1578,7 +1579,7 @@ function downloadCSV(reportType, header, rows) {
 function exportSessionsCSV() {
   const header = ['Session ID', 'Session Name', 'Project', 'Last Active', 'Duration (min)', 'Model', 'Turns', 'Input', 'Output', 'Cache Read', 'Cache Creation', 'Est. Cost'];
   const rows = lastFilteredSessions.map(s => {
-    const cost = calcCost(s.model, s.input, s.output, s.cache_read, s.cache_creation);
+    const cost = calcCost(s.model, s.input, s.output, s.cache_read, s.cache_creation, s.cache_1h);
     return [s.session_id, s.session_name || '', s.project, s.last, s.duration_min, s.model, s.turns, s.input, s.output, s.cache_read, s.cache_creation, cost.toFixed(4)];
   });
   downloadCSV('sessions', header, rows);
