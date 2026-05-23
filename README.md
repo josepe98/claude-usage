@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](LICENSE)
 [![claude-code](https://img.shields.io/badge/claude--code-black?style=flat-square)](https://claude.ai/code)
 
-**Pro and Max subscribers get a progress bar. This gives you the full picture.**
+**See exactly how you're using Claude Code — tokens, costs, models, and projects, all from your local data.**
 
 Claude Code writes detailed usage logs locally — token counts, models, sessions, projects — regardless of your plan. This dashboard reads those logs and turns them into charts and cost estimates. Works on API, Pro, and Max plans.
 
