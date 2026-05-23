@@ -2370,6 +2370,7 @@ function renderPareto(filteredSessions) {  // eslint-disable-line no-unused-vars
   }
   const withCost = filteredSessions.map(s => Object.assign({}, s, {
     cost: calcCost(s.model, s.input, s.output, s.cache_read, s.cache_creation, s.cache_1h || 0),
+    cost: calcCost(s.model, s.input, s.output, s.cache_read, s.cache_creation),
   })).filter(s => s.cost > 0);
   if (!withCost.length) { el.style.display = "none"; return; }
   const total = withCost.reduce((a, s) => a + s.cost, 0);
@@ -2438,6 +2439,8 @@ function renderToolsChart(rows) {  // eslint-disable-line no-unused-vars
       },
     },
   });
+  const names = ranked.map(s => \`\${s.project} (\${s.session_id})\`).join(", ");
+  el.innerHTML = \`<strong>Cost concentration:</strong> top 5 sessions account for <strong>\${pct}%</strong> of spend in the current range. <span style="color:var(--muted)">(\${names})</span>\`;
 }
 
 function renderProjectChart(byProject) {
