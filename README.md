@@ -93,6 +93,9 @@ python cli.py theme list
 
 # Apply a theme (apple, linear, vercel, notion, stripe)
 python cli.py theme set linear
+
+# Launch the tray / menu-bar app (see "Menu bar app" below)
+python cli.py tray
 ```
 
 The scanner is incremental — it tracks each file's path and modification time, so re-running `scan` is fast and only processes new or changed files.
@@ -132,6 +135,52 @@ Costs are calculated using **Anthropic API pricing as of April 2026** ([claude.c
 > **Note:** These are API prices. If you use Claude Code via a Max or Pro subscription, your actual cost structure is different (subscription-based, not per-token).
 
 ---
+
+---
+
+## Menu bar app
+
+A tiny tray / menu-bar icon that shows today's Claude spend at a glance and a
+dropdown with "Today" / "This month" totals. Click **Open Dashboard** to launch
+the full UI in your browser.
+
+The tray app polls `http://localhost:8080/api/health` and `/api/data` every
+60 seconds, so you need the dashboard running in the background (or as a service)
+for it to display data. An offline indicator appears if the dashboard is unreachable.
+
+### Install (optional dependency)
+
+```
+# macOS — native NSStatusBar via rumps
+pip install rumps
+
+# Linux / Windows — cross-platform indicator via pystray
+pip install pystray pillow
+```
+
+`rumps` / `pystray` are NOT required to run the rest of the dashboard — they
+are only needed for the tray feature. The tray module imports them lazily, so
+nothing else is affected if they aren't installed.
+
+### Launch
+
+```
+# Defaults to http://localhost:8080
+python cli.py tray
+
+# Point at a different dashboard
+python cli.py tray --url http://my-host:9000
+```
+
+### Badge colour
+
+The icon hints at today's spend level so you can tell at a glance:
+
+| Today's spend | Colour |
+|---|---|
+| < $1     | green |
+| $1 – $10 | amber |
+| > $10    | red   |
 
 ## Cowork sessions
 
