@@ -234,6 +234,7 @@ def cmd_tool_usage(range_days=None):
     """, params).fetchall()
     if not rows:
         print("No tool usage recorded.")
+        conn.close()
         return
     label = f"last {range_days}d" if range_days else "all time"
     print(f"\nTop tools by turns ({label}):")
@@ -241,6 +242,34 @@ def cmd_tool_usage(range_days=None):
     print(f"  {'-' * 40}  {'-' * 8}  {'-' * 12}")
     for r in rows:
         print(f"  {r['tool'][:40]:40s}  {r['turns']:>8d}  {(r['tokens'] or 0):>12,d}")
+    conn.close()
+
+
+def cmd_forecast():
+    """Print burn-rate forecast: 7-day average, 30-day average, month-end projection."""
+    if not DB_PATH.exists():
+        print(f"Database not found at {DB_PATH}. Run: python cli.py scan")
+        return
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    # Import the helpers from dashboard so the logic stays in one place.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from dashboard import _daily_cost_history, _forecast
+    f = _forecast(_daily_cost_history(conn))
+    if not f["days_in_data"]:
+        print("No spend data yet — run scan after some Claude Code usage.")
+        conn.close()
+        return
+    arrow = "up" if f["trend"] == "up" else "down" if f["trend"] == "down" else "flat"
+    print()
+    print("Burn-rate forecast")
+    print("==================")
+    print(f"  7-day avg spend   ${f['avg_7d']:>8.2f}/day  (trend: {arrow})")
+    print(f"  30-day avg spend  ${f['avg_30d']:>8.2f}/day")
+    print(f"  Month so far      ${f['month_to_date']:>8.2f}")
+    print(f"  Days left in month  {f['days_left_in_month']}")
+    print(f"  Projected total   ${f['projected_month_end']:>8.2f}  (month-end at current pace)")
+    print()
     conn.close()
 
 
@@ -731,6 +760,7 @@ COMMANDS = {
     "week": cmd_week,
     "stats": cmd_stats,
     "tool-usage": cmd_tool_usage,
+    "forecast": cmd_forecast,
     "dashboard": cmd_dashboard,
     "theme": cmd_theme,
     "completions": cmd_completions,
