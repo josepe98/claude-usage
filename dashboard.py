@@ -414,6 +414,46 @@ def _forecast(history):
     }
 
 
+BUDGET_CONFIG_PATH = Path.home() / ".claude" / "budget.json"
+
+
+def _load_budget():
+    """Read ~/.claude/budget.json. Schema:
+       {"monthly_usd": 50.0, "warn_at": [0.8, 1.0], "last_alerted": {...}}
+    Returns {} if missing or unreadable so callers can use .get(...)."""
+    try:
+        return json.loads(BUDGET_CONFIG_PATH.read_text())
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_budget(cfg):
+    BUDGET_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    BUDGET_CONFIG_PATH.write_text(json.dumps(cfg, indent=2))
+
+
+def _budget_status(month_to_date_usd, cfg=None):
+    """Compute current % consumed + threshold crossed (if any)."""
+    cfg = cfg or _load_budget()
+    cap = cfg.get("monthly_usd")
+    if not cap or cap <= 0:
+        return {"configured": False}
+    pct = month_to_date_usd / cap
+    thresholds = cfg.get("warn_at", [0.8, 1.0])
+    crossed = None
+    for t in sorted(thresholds, reverse=True):
+        if pct >= t:
+            crossed = t
+            break
+    return {
+        "configured": True,
+        "monthly_usd": cap,
+        "month_to_date": round(month_to_date_usd, 2),
+        "pct": round(pct, 4),
+        "crossed_threshold": crossed,
+    }
+
+
 def get_dashboard_data(db_path=DB_PATH):
     if not db_path.exists():
         return {"error": "Database not found. Run: python cli.py scan"}
@@ -557,6 +597,30 @@ def get_dashboard_data(db_path=DB_PATH):
 
     year_calendar = _year_calendar(conn)
     forecast = _forecast(_daily_cost_history(conn))
+    # Month-to-date cost for budget watchdog. Pulls current calendar month's
+    # spend using current PRICING (estimate; matches what the dashboard shows).
+    from pricing import get_pricing as _gp
+    from datetime import date as _date
+    month_prefix = _date.today().strftime("%Y-%m")
+    mtd_rows = conn.execute("""
+        SELECT model,
+               SUM(input_tokens) as inp, SUM(output_tokens) as out,
+               SUM(cache_read_tokens) as cr, SUM(cache_creation_tokens) as cw
+        FROM turns
+        WHERE substr(timestamp, 1, 7) = ?
+        GROUP BY model
+    """, (month_prefix,)).fetchall()
+    month_to_date_usd = 0.0
+    for r in mtd_rows:
+        p = _gp(r["model"])
+        if not p:
+            continue
+        month_to_date_usd += ((r["inp"] or 0) * p["input"]
+                              + (r["out"] or 0) * p["output"]
+                              + (r["cr"] or 0) * p["cache_read"]
+                              + (r["cw"] or 0) * p["cache_write"]) / 1_000_000
+    budget_status_data = _budget_status(month_to_date_usd)
+
     conn.close()
 
     return {
@@ -567,6 +631,7 @@ def get_dashboard_data(db_path=DB_PATH):
         "year_calendar":   year_calendar,
         "tools_daily":     tools_daily,
         "forecast":        forecast,
+        "budget":          budget_status_data,
         "generated_at":    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
@@ -1155,6 +1220,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <div class="container">
   <div class="stats-row" id="stats-row"></div>
     <div id="pareto-card" style="display:none; margin: -8px 0 16px 0; padding: 10px 14px; background: rgba(217,119,87,0.08); border-radius: 8px; font-size: 12px; color: var(--text);"></div>
+  <div id="budget-bar" style="display:none; margin:0 0 16px 0;"><div style="display:flex; justify-content:space-between; align-items:baseline; margin-bottom:6px;"><div style="font-size:12px; color:var(--muted);">Monthly budget <span id="budget-label"></span></div><div style="font-size:11px; color:var(--muted);"><a href="#" onclick="_editBudget(); return false;" style="color:var(--muted); text-decoration:underline;">edit</a></div></div><div id="budget-track" style="height:6px; background:rgba(255,255,255,0.08); border-radius:3px; overflow:hidden;"><div id="budget-fill" style="height:100%; background:#4ade80; transition: width 0.3s, background-color 0.3s;"></div></div></div>
+    <div class="stats-row" id="stats-row"></div>
   <div class="charts-grid">
     <div class="chart-card wide">
       <h2 id="daily-chart-title">Daily Token Usage</h2>
@@ -1854,6 +1921,8 @@ function applyFilter() {
   document.getElementById('hourly-chart-title').textContent = 'Average Hourly Distribution \u2014 ' + RANGE_LABELS[selectedRange];
 
   renderStats(totals, prevTotals);
+  renderStats(totals);
+  renderBudget();
   renderDailyChart(daily);
   // Year calendar deliberately ignores the active range — always shows the
   // trailing 365 days regardless of the Models/Range filter selection.
@@ -2026,6 +2095,39 @@ function forecastColor() {
 }
 
 function renderStats(t, prev) {
+// ── Renderers ──────────────────────────────────────────────────────────────
+function renderBudget() {  // eslint-disable-line no-unused-vars
+  const b = rawData && rawData.budget;
+  const bar = document.getElementById('budget-bar');
+  const fill = document.getElementById('budget-fill');
+  const label = document.getElementById('budget-label');
+  if (!bar || !fill || !label) return;
+  if (!b || !b.configured) {
+    bar.style.display = 'none';
+    return;
+  }
+  bar.style.display = '';
+  const pct = Math.min(b.pct, 1.5);  // cap bar visual at 150% for readability
+  fill.style.width = (Math.min(pct, 1) * 100).toFixed(1) + '%';
+  // Colour: green <80%, amber 80-100%, red >=100%
+  fill.style.backgroundColor = pct >= 1 ? '#f87171' : pct >= 0.8 ? '#fbbf24' : '#4ade80';
+  const overflow = pct > 1 ? ` (${((pct - 1) * 100).toFixed(0)}% over)` : '';
+  label.textContent = '$' + b.month_to_date.toFixed(2) + ' / $' + b.monthly_usd.toFixed(2) + overflow;
+}
+
+function _editBudget() {
+  const cur = (rawData && rawData.budget && rawData.budget.monthly_usd) || '';
+  const v = prompt('Monthly budget (USD) — leave empty to disable:', cur);
+  if (v === null) return;
+  const val = v.trim() === '' ? null : parseFloat(v);
+  fetch('/api/budget', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ monthly_usd: val }),
+  }).then(() => loadData());
+}
+
+function renderStats(t) {
   const rangeLabel = RANGE_LABELS[selectedRange].toLowerCase();
   const stats = [
     { label: 'Sessions',       value: t.sessions.toLocaleString(), sub: rangeLabel,               delta: prev && _deltaBadge(t.sessions, prev.sessions) },
