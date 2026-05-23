@@ -802,6 +802,143 @@ def cmd_tray(url=None):
 
 
 
+def cmd_timeline(session_id, out=None):
+    """Generate a markdown timeline for a single session.
+
+    Accepts a full session UUID or any unique prefix (8+ chars recommended).
+    Writes to stdout by default; use `out` to write to a file path.
+    """
+    if not DB_PATH.exists():
+        print("Database not found. Run: python3 cli.py scan")
+        sys.exit(1)
+
+    if not session_id or len(session_id) < 4:
+        print("Provide a session id (or at least its first 4 characters).")
+        sys.exit(1)
+
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+
+    matches = conn.execute(
+        "SELECT session_id FROM sessions WHERE session_id LIKE ? LIMIT 5",
+        (session_id + "%",),
+    ).fetchall()
+
+    if not matches:
+        print(f"Unknown session id: {session_id}")
+        conn.close()
+        sys.exit(1)
+
+    if len(matches) > 1:
+        print(f"Ambiguous session id '{session_id}'. Matches:")
+        for m in matches:
+            print(f"  - {m['session_id']}")
+        conn.close()
+        sys.exit(1)
+
+    full_id = matches[0]["session_id"]
+
+    session = conn.execute("""
+        SELECT
+            session_id, project_name, first_timestamp, last_timestamp, git_branch,
+            total_input_tokens, total_output_tokens,
+            total_cache_read, total_cache_creation, model, turn_count
+        FROM sessions
+        WHERE session_id = ?
+    """, (full_id,)).fetchone()
+
+    turn_rows = conn.execute("""
+        SELECT
+            timestamp, model, input_tokens, output_tokens,
+            cache_read_tokens, cache_creation_tokens, cache_1h_tokens, tool_name
+        FROM turns
+        WHERE session_id = ?
+        ORDER BY timestamp ASC, id ASC
+    """, (full_id,)).fetchall()
+    conn.close()
+
+    def _time(ts):
+        # ISO timestamp -> HH:MM:SS (fallback to first 8 chars after T)
+        if not ts:
+            return "--:--:--"
+        if "T" in ts:
+            t = ts.split("T", 1)[1]
+        else:
+            t = ts
+        return t[:8] if len(t) >= 8 else t
+
+    lines = []
+    lines.append(f"# Session `{full_id[:8]}` — {session['project_name'] or 'unknown'}")
+    lines.append("")
+    lines.append(f"- **Full id:** `{full_id}`")
+    lines.append(f"- **Project:** {session['project_name'] or 'unknown'}")
+    if session["git_branch"]:
+        lines.append(f"- **Branch:** `{session['git_branch']}`")
+    lines.append(f"- **First turn:** {(session['first_timestamp'] or '')[:19].replace('T', ' ')}")
+    lines.append(f"- **Last turn:** {(session['last_timestamp'] or '')[:19].replace('T', ' ')}")
+
+    total_cost = 0.0
+    tool_counts = {}
+    for r in turn_rows:
+        total_cost += calc_cost(
+            r["model"] or "",
+            r["input_tokens"] or 0,
+            r["output_tokens"] or 0,
+            r["cache_read_tokens"] or 0,
+            r["cache_creation_tokens"] or 0,
+            r["cache_1h_tokens"] or 0,
+        )
+        tool = r["tool_name"] or "(no tool)"
+        tool_counts[tool] = tool_counts.get(tool, 0) + 1
+
+    lines.append(f"- **Turns:** {session['turn_count'] or len(turn_rows)}")
+    lines.append(f"- **Total input:** {fmt(session['total_input_tokens'] or 0)} tokens")
+    lines.append(f"- **Total output:** {fmt(session['total_output_tokens'] or 0)} tokens")
+    lines.append(f"- **Total cost:** {fmt_cost(total_cost)}")
+    lines.append("")
+    lines.append("## Turns")
+    lines.append("")
+
+    if not turn_rows:
+        lines.append("_No turns recorded._")
+    else:
+        for r in turn_rows:
+            ts = _time(r["timestamp"])
+            model = r["model"] or "unknown"
+            tool = r["tool_name"] or "(no tool)"
+            inp_tok = r["input_tokens"] or 0
+            out_tok = r["output_tokens"] or 0
+            cost = calc_cost(
+                model,
+                inp_tok, out_tok,
+                r["cache_read_tokens"] or 0,
+                r["cache_creation_tokens"] or 0,
+                r["cache_1h_tokens"] or 0,
+            )
+            lines.append(
+                f"- **{ts}** \u00b7 {model} \u00b7 {tool} \u00b7 "
+                f"{fmt(inp_tok)} in / {fmt(out_tok)} out \u2192 {fmt_cost(cost)}"
+            )
+
+    lines.append("")
+    lines.append("## Tool histogram")
+    lines.append("")
+    if not tool_counts:
+        lines.append("_No tools used._")
+    else:
+        for tool, count in sorted(tool_counts.items(), key=lambda x: (-x[1], x[0])):
+            lines.append(f"- `{tool}`: {count}")
+
+    output = "\n".join(lines) + "\n"
+
+    if out:
+        Path(out).write_text(output, encoding="utf-8")
+        print(f"Wrote timeline to {out}")
+    else:
+        sys.stdout.write(output)
+
+
+
 # ── Theme command ──────────────────────────────────────────────────────────────
 
 def cmd_theme():
@@ -1515,6 +1652,8 @@ Usage:
                                                  Scan + start dashboard
   python3 cli.py report [--period 7d|30d|all] [--out FILE]
                                                  Generate a Markdown usage report
+  python3 cli.py timeline <session_id> [--out FILE]
+                                                 Markdown timeline for a session
   python3 cli.py theme <list|add|remove>          Manage UI themes
   python3 cli.py completions <bash|zsh|fish>      Print shell tab-completion script
   python3 cli.py install-git-hook [--global]      Install post-commit hook (commit -> session trace)
@@ -1540,6 +1679,7 @@ COMMANDS = {
     "tray": cmd_tray,
     "alerts": cmd_alerts,
     "import-workbench": cmd_import_workbench,
+    "timeline": cmd_timeline,
 }
 
 def parse_named_arg(args, flag):
@@ -1599,5 +1739,10 @@ if __name__ == "__main__":
             print("Usage: python3 cli.py import-workbench <path/to/export.json>")
             sys.exit(1)
         cmd_import_workbench(rest[0])
+    elif command == "timeline":
+        if not rest or rest[0].startswith("--"):
+            print("Usage: python3 cli.py timeline <session_id> [--out FILE]")
+            sys.exit(1)
+        cmd_timeline(rest[0], out=parse_named_arg(rest, "--out"))
     else:
         COMMANDS[command]()
