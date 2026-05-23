@@ -201,6 +201,46 @@ def cmd_week():
     conn.close()
 
 
+def cmd_tool_usage(range_days=None):
+    """Show top tools by turn count across all sessions.
+
+    Surfaces the `tool_name` column that the scanner has been capturing
+    since day one but which had no consumer until now.
+    """
+    if not DB_PATH.exists():
+        print(f"Database not found at {DB_PATH}. Run: python cli.py scan")
+        return
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    where = ""
+    params = []
+    if range_days:
+        from datetime import datetime as _dt, timedelta as _td
+        cutoff = (_dt.utcnow() - _td(days=int(range_days))).strftime("%Y-%m-%d")
+        where = "WHERE date(timestamp) >= ?"
+        params = [cutoff]
+    rows = conn.execute(f"""
+        SELECT COALESCE(NULLIF(tool_name, ''), '(no tool / direct turn)') as tool,
+               COUNT(*) as turns,
+               SUM(input_tokens + output_tokens) as tokens
+        FROM turns
+        {where}
+        GROUP BY tool
+        ORDER BY turns DESC
+        LIMIT 20
+    """, params).fetchall()
+    if not rows:
+        print("No tool usage recorded.")
+        return
+    label = f"last {range_days}d" if range_days else "all time"
+    print(f"\nTop tools by turns ({label}):")
+    print(f"  {'TOOL':40s}  {'TURNS':>8s}  {'TOKENS':>12s}")
+    print(f"  {'-' * 40}  {'-' * 8}  {'-' * 12}")
+    for r in rows:
+        print(f"  {r['tool'][:40]:40s}  {r['turns']:>8d}  {(r['tokens'] or 0):>12,d}")
+    conn.close()
+
+
 def cmd_stats():
     conn = require_db()
     conn.row_factory = sqlite3.Row
@@ -532,6 +572,7 @@ COMMANDS = {
     "today": cmd_today,
     "week": cmd_week,
     "stats": cmd_stats,
+    "tool-usage": cmd_tool_usage,
     "dashboard": cmd_dashboard,
     "theme": cmd_theme,
 }
@@ -562,5 +603,7 @@ if __name__ == "__main__":
         )
     elif command == "scan" and projects_dir:
         cmd_scan(projects_dir=projects_dir)
+    elif command == "tool-usage":
+        cmd_tool_usage(range_days=parse_named_arg(rest, "--range"))
     else:
         COMMANDS[command]()
