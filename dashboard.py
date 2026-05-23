@@ -1210,7 +1210,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     </div>
   </div>
 
-  <div class="chart-grid">
+  <div class="charts-grid" style="grid-template-columns: 1fr;">
     <div class="chart-card">
       <h2>Top Tools by Turns</h2>
       <div id="tools-chart-empty" style="display:none; color:var(--muted); padding:24px 0; text-align:center;">No tool_name data yet — older transcripts may not have tool info.</div>
