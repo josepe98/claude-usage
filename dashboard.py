@@ -9,7 +9,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 from pathlib import Path
 
-from pricing import PRICING
+from pricing import PRICING, get_pricing
 from datetime import datetime
 
 DB_PATH    = Path.home() / ".claude" / "usage.db"
@@ -167,6 +167,73 @@ def get_themes():
 
 
 
+# ── 1-hour cache opportunity hints ────────────────────────────────────────────
+# Anthropic offers two prompt-cache tiers:
+#   * 5-minute (default): cache_write costs 1.25x base input, but the cache
+#     expires every 5 min so a long session keeps rewriting it.
+#   * 1-hour: cache_write costs 1.6x the 5-minute rate (= 2.0x base input)
+#     but only needs to be paid once per session.
+# For long sessions with heavy cache writes, switching to the 1-hour tier
+# typically saves 30-50 % of the cache-creation cost.
+
+CACHE_1H_MIN_DURATION_MIN = 30
+CACHE_1H_MIN_CACHE_CREATION = 100_000
+# Mid-band of the 30-50 % heuristic savings range.
+CACHE_1H_SAVINGS_FRACTION = 0.40
+
+
+def _cache_1h_opportunities(conn):
+    """Return sessions that would have benefited from the 1-hour cache tier.
+
+    Criteria: duration > 30 minutes AND cache_creation > 100 000 tokens.
+    Returns the top 10 candidates sorted by estimated savings (desc):
+
+        {session_id, duration_min, cache_creation_tokens,
+         current_cost, estimated_savings_with_1h}
+
+    Estimated savings are projected at ~40 % of the current cache-creation
+    cost (mid-band of the 30-50 % heuristic range). Sessions on unknown /
+    non-billable models are skipped so we never invent a savings figure.
+    """
+    rows = conn.execute("""
+        SELECT session_id, first_timestamp, last_timestamp,
+               total_cache_creation, model
+        FROM sessions
+        WHERE total_cache_creation > ?
+    """, (CACHE_1H_MIN_CACHE_CREATION,)).fetchall()
+
+    opportunities = []
+    for r in rows:
+        try:
+            t1 = datetime.fromisoformat((r["first_timestamp"] or "").replace("Z", "+00:00"))
+            t2 = datetime.fromisoformat((r["last_timestamp"] or "").replace("Z", "+00:00"))
+            duration_min = round((t2 - t1).total_seconds() / 60, 1)
+        except Exception:
+            continue
+        if duration_min <= CACHE_1H_MIN_DURATION_MIN:
+            continue
+
+        p = get_pricing(r["model"])
+        if p is None:
+            continue  # unknown / non-billable model — don't guess
+
+        cache_creation = r["total_cache_creation"] or 0
+        # Current cost reflects the 5-minute tier (the default cache_write).
+        current_cost = cache_creation * p["cache_write_5m"] / 1_000_000
+        estimated_savings = round(current_cost * CACHE_1H_SAVINGS_FRACTION, 4)
+
+        opportunities.append({
+            "session_id":                r["session_id"][:8],
+            "duration_min":              duration_min,
+            "cache_creation_tokens":     cache_creation,
+            "current_cost":              round(current_cost, 4),
+            "estimated_savings_with_1h": estimated_savings,
+        })
+
+    opportunities.sort(key=lambda o: o["estimated_savings_with_1h"], reverse=True)
+    return opportunities[:10]
+
+
 def _cost_concentration(sessions_with_cost, top_n=5):
     """Compute Pareto-style concentration: top-N sessions' cost as % of total."""
     if not sessions_with_cost:
@@ -308,14 +375,17 @@ def get_dashboard_data(db_path=DB_PATH):
             "cache_creation": r["total_cache_creation"] or 0,
         })
 
+    cache_1h_opportunities = _cache_1h_opportunities(conn)
+
     conn.close()
 
     return {
-        "all_models":      all_models,
-        "daily_by_model":  daily_by_model,
-        "hourly_by_model": hourly_by_model,
-        "sessions_all":    sessions_all,
-        "generated_at":    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "all_models":             all_models,
+        "daily_by_model":         daily_by_model,
+        "hourly_by_model":        hourly_by_model,
+        "sessions_all":           sessions_all,
+        "cache_1h_opportunities": cache_1h_opportunities,
+        "generated_at":           datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
 
@@ -912,6 +982,22 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <tbody id="project-branch-cost-body"></tbody>
     </table>
   </div>
+  <div class="table-card" id="cache-1h-card">
+    <div class="section-title">1-Hour Cache Opportunities</div>
+    <p class="muted" style="font-size:12px;margin-bottom:12px;line-height:1.5;">
+      Sessions longer than 30 minutes with &gt; 100k cache-creation tokens. On Anthropic&#39;s default 5-minute cache tier the cache expires and gets rewritten roughly every 5 min; the 1-hour tier costs 1.6&times; per write but only needs to be paid once per session. Switching these candidates would save ~40% of the current cache-creation cost. See the <a href="https://docs.claude.com/en/docs/build-with-claude/prompt-caching" target="_blank" style="color:var(--accent)">prompt caching docs</a>.
+    </p>
+    <table>
+      <thead><tr>
+        <th>Session</th>
+        <th>Duration</th>
+        <th>Cache Creation</th>
+        <th>Current Cost</th>
+        <th>Est. Savings (1h tier)</th>
+      </tr></thead>
+      <tbody id="cache-1h-body"></tbody>
+    </table>
+  </div>
 </div>
 
 <footer>
@@ -1427,6 +1513,7 @@ function applyFilter() {
   renderModelCostTable(byModel);
   renderProjectCostTable(lastByProject.slice(0, 20));
   renderProjectBranchCostTable(lastByProjectBranch.slice(0, 20));
+  renderCache1hOpportunities(rawData.cache_1h_opportunities || []);
 
   const visibleSessions = lastFilteredSessions.slice(0, 20);
   if (!visibleSessions.length) {
@@ -1737,6 +1824,22 @@ function renderPareto(filteredSessions) {  // eslint-disable-line no-unused-vars
   el.style.display = "";
   const names = ranked.map(s => `${s.project} (${s.session_id})`).join(", ");
   el.innerHTML = `<strong>Cost concentration:</strong> top 5 sessions account for <strong>${pct}%</strong> of spend in the current range. <span style="color:var(--muted)">(${names})</span>`;
+}
+
+function renderCache1hOpportunities(opps) {
+  const body = document.getElementById('cache-1h-body');
+  if (!body) return;
+  if (!opps || !opps.length) {
+    body.innerHTML = '<tr><td colspan="5" class="muted" style="text-align:center;padding:20px">No long sessions with heavy cache writes detected — nothing to optimize.</td></tr>';
+    return;
+  }
+  body.innerHTML = opps.map(o => `<tr>
+      <td class="muted" style="font-family:monospace">${esc(o.session_id)}&hellip;</td>
+      <td class="muted">${esc(o.duration_min)}m</td>
+      <td class="num">${fmt(o.cache_creation_tokens)}</td>
+      <td class="cost">${fmtCost(o.current_cost)}</td>
+      <td class="cost" title="~40% of current cache-creation cost">${fmtCost(o.estimated_savings_with_1h)}</td>
+    </tr>`).join('');
 }
 
 function renderProjectChart(byProject) {
