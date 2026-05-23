@@ -2603,7 +2603,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     </div>
   </div>
 
-  <div class="chart-grid">
+  <div class="charts-grid" style="grid-template-columns: 1fr;">
     <div class="chart-card">
       <h2>Top Tools by Turns</h2>
       <div id="tools-chart-empty" style="display:none; color:var(--muted); padding:24px 0; text-align:center;">No tool_name data yet — older transcripts may not have tool info.</div>
@@ -2626,11 +2626,15 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     </table>
   </div>
   <div class="table-card">
-    <div class="section-header"><div class="section-title">Recent Sessions</div><div class="section-actions"><button class="md-btn" onclick="copySessionsMD()" title="Copy table as markdown">&#x1f4cb; MD</button><button class="export-btn" onclick="exportSessionsCSV()" title="Export all filtered sessions to CSV">&#x2913; CSV</button></div></div>
+    <div class="section-header">
+      <div class="section-title">Recent Sessions</div>
+      <div class="section-actions">
+        <input id="sessions-search" type="search" placeholder="Search project / branch / session…" oninput="_onSearchInput(this.value)" style="width:240px; padding:6px 10px; background: var(--card); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 12px;">
+        <button class="md-btn" onclick="copySessionsMD()" title="Copy table as markdown">&#x1f4cb; MD</button>
+        <button class="export-btn" onclick="exportSessionsCSV()" title="Export all filtered sessions to CSV">&#x2913; CSV</button>
+      </div>
+    </div>
     <div class="hint" style="margin-bottom:12px;">Click a session row for branch, tool, cwd, and turn history detail.</div>
-    <div class="section-header"><div class="section-title">Recent Sessions</div>
-      <input id="sessions-search" type="search" placeholder="Search project / branch / session…" oninput="_onSearchInput(this.value)" style="width:100%; max-width:320px; padding:6px 10px; margin: 4px 0 12px; background: var(--card); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 12px;"><button class="export-btn" onclick="exportSessionsCSV()" title="Export all filtered sessions to CSV">&#x2913; CSV</button></div>
-    <table>
     <table id="sessions-table">
       <thead><tr>
         <th>Session</th>
@@ -2749,7 +2753,7 @@ async function _populateThemeDropdown() {  // eslint-disable-line no-unused-vars
     const themes = await r.json();
     const current = localStorage.getItem("dashboard-theme-id") || "apple";
     sel.innerHTML = themes.map(t =>
-      \`<option value="\${t.id}" \${t.id === current ? "selected" : ""}>\${t.name}</option>\`
+      `<option value="${t.id}" ${t.id === current ? "selected" : ""}>${t.name}</option>`
     ).join("");
     // Cache themes for instant switching without another fetch
     window._cachedThemes = themes;
@@ -2761,6 +2765,7 @@ function _onThemeQuickChange(id) {  // eslint-disable-line no-unused-vars
   const t = themes.find(x => x.id === id);
   if (!t) return;
   setTheme(t.css, t.id);
+}
 function _renderTags(s) {  // eslint-disable-line no-unused-vars
   if (!s.tags || !s.tags.length) return "";
   return s.tags.map(t => `<span style="display:inline-block;margin-left:4px;padding:1px 6px;border-radius:8px;font-size:10px;background:rgba(217,119,87,0.18);color:var(--accent);">${t}</span>`).join("");
@@ -3125,6 +3130,7 @@ function onAccountChange(value) {
   _savePrefs({ account: selectedAccount });
   updateURL();
   applyFilter();
+}
 // ── A/B compare mode ───────────────────────────────────────────────────────
 function toggleCompareMode() {
   compareMode = !compareMode;
@@ -3418,33 +3424,6 @@ function computePeriod(range) {
     nonBillableModels: Array.from(nonBillableModels),
   };
 
-  // Previous-period totals (same-length window ending the day before `start`)
-  let prevTotals = null;
-  if (start && end) {
-    const [prevStart, prevEnd] = _prevWindow(start, end);
-    const prevDaily = rawData.daily_by_model.filter(r =>
-      selectedModels.has(r.model) && r.day >= prevStart && r.day <= prevEnd
-    );
-    prevTotals = { input: 0, output: 0, cache_read: 0, cache_creation: 0, turns: 0, cost: 0 };
-    const prevSessIds = new Set();
-    for (const r of prevDaily) {
-      prevTotals.input  += r.input;
-      prevTotals.output += r.output;
-      prevTotals.cache_read     += r.cache_read;
-      prevTotals.cache_creation += r.cache_creation;
-      prevTotals.turns  += r.turns;
-    }
-    for (const s of rawData.sessions_all) {
-      if (!selectedModels.has(s.model)) continue;
-      if (s.last_date >= prevStart && s.last_date <= prevEnd) prevSessIds.add(s.session_id);
-    }
-    prevTotals.sessions = prevSessIds.size;
-    prevTotals.cost = prevDaily.reduce(
-      (acc, r) => acc + calcCost(r.model, r.input, r.output, r.cache_read, r.cache_creation),
-      0,
-    );
-  }
-
   const hourlySrc = (rawData.hourly_by_model || []).filter(r =>
     selectedModels.has(r.model) && (!start || r.day >= start) && (!end || r.day <= end)
   );
@@ -3457,43 +3436,6 @@ function computePeriod(range) {
     filteredSessions, hourlyAgg,
   };
 }
-
-  renderStats(totals, prevTotals);
-  renderStats(totals);
-  renderBudget();
-  renderDailyChart(daily);
-  // Year calendar deliberately ignores the active range — always shows the
-  // trailing 365 days regardless of the Models/Range filter selection.
-  renderYearCalendar(rawData.year_calendar || []);
-  renderHourlyChart(hourlyAgg);
-  renderModelChart(byModel);
-  renderProjectChart(byProject);
-  renderPareto(lastFilteredSessions || filteredSessions);
-  // Tools chart: filter by selected date range; tool field is captured for
-  // assistant turns that issued a tool_use event.
-  const filteredTools = (rawData.tools_daily || []).filter(r =>
-    (!start || r.day >= start) && (!end || r.day <= end)
-  );
-  renderToolsChart(filteredTools);
-  renderAnomalyBanner();
-  renderDowHourHeatmap();
-  renderHistogram();
-  renderPlanCard();
-  renderDowngradeSuggestions();
-  renderCacheHit(rawData ? rawData.cache_hit_summary : null);
-  renderInbound();
-  renderTimeOnTask();
-  lastFilteredSessions = sortSessions(filteredSessions);
-  lastByProject = sortProjects(byProject);
-  lastByProjectBranch = sortProjectBranch(byProjectBranch);
-  lastByBranch = sortBranchOnly(byBranch);
-  lastByModel = sortModels(byModel);
-  renderSessionsTable(lastFilteredSessions.slice(0, 20));
-  renderModelCostTable(byModel);
-  renderProjectCostTable(lastByProject.slice(0, 20));
-  renderProjectBranchCostTable(lastByProjectBranch.slice(0, 20));
-  renderBranchOnlyCostTable(lastByBranch.slice(0, 20));
-  renderCache1hOpportunities(rawData.cache_1h_opportunities || []);
 // applyFilter — single entry point used by every onChange in the UI. In the
 // default case it computes one period (selectedRange). In compare-mode it
 // computes both periods and hands the diff data to the dual renderers.
@@ -3510,16 +3452,12 @@ function applyFilter() {
   document.getElementById('daily-chart-title').textContent  = 'Daily Token Usage — ' + titleSuffix;
   document.getElementById('hourly-chart-title').textContent = 'Average Hourly Distribution — ' + RANGE_LABELS[selectedRange];
 
+  // Period-specific renderers: differ between single-view and A/B compare.
   if (compareMode && pb) {
     renderStatsAB(pa.totals, pb.totals);
     renderDailyChartAB(pa.daily, pb.daily);
-    renderModelChart(pa.byModel);
-    renderProjectChart(pa.byProject);
-    renderHourlyChart(pa.hourlyAgg);
-    renderPareto(pa.filteredSessions);
     renderModelCostTableAB(pa.byModel, pb.byModel);
     renderProjectCostTableAB(pa.byProject, pb.byProject);
-    renderProjectBranchCostTable(sortProjectBranch(pa.byProjectBranch).slice(0, 20));
     // Sessions: union, colour-coded by period membership.
     const ids = new Map();
     for (const s of pa.filteredSessions) ids.set(s.session_id_full, 'period-a');
@@ -3540,9 +3478,6 @@ function applyFilter() {
   } else {
     renderStats(pa.totals, pa.prevTotals);
     renderDailyChart(pa.daily);
-    renderHourlyChart(pa.hourlyAgg);
-    renderModelChart(pa.byModel);
-    renderProjectChart(pa.byProject);
     renderPareto(lastFilteredSessions || pa.filteredSessions);
     lastFilteredSessions = sortSessions(pa.filteredSessions);
     lastByProject = sortProjects(pa.byProject);
@@ -3550,8 +3485,29 @@ function applyFilter() {
     renderSessionsTable(lastFilteredSessions.slice(0, 20));
     renderModelCostTable(pa.byModel);
     renderProjectCostTable(lastByProject.slice(0, 20));
-    renderProjectBranchCostTable(lastByProjectBranch.slice(0, 20));
   }
+
+  // Shared renderers: run in BOTH single-view and compare mode. Period A is
+  // used as the reference period in compare mode (avoids leaving half the
+  // dashboard blank when the toggle is on).
+  renderModelChart(pa.byModel);
+  renderProjectChart(pa.byProject);
+  renderHourlyChart(pa.hourlyAgg);
+  renderProjectBranchCostTable(sortProjectBranch(pa.byProjectBranch).slice(0, 20));
+  const filteredTools = (rawData.tools_daily || []).filter(r => (!pa.start || r.day >= pa.start) && (!pa.end || r.day <= pa.end));
+  renderBudget();
+  renderYearCalendar(rawData.year_calendar || []);
+  renderToolsChart(filteredTools);
+  renderAnomalyBanner();
+  renderDowHourHeatmap();
+  renderHistogram();
+  renderPlanCard();
+  renderDowngradeSuggestions();
+  renderCacheHit(rawData ? rawData.cache_hit_summary : null);
+  renderInbound();
+  renderTimeOnTask();
+  renderBranchOnlyCostTable(lastByBranch.slice(0, 20));
+  renderCache1hOpportunities(rawData.cache_1h_opportunities || []);
 
   const visibleSessions = lastFilteredSessions.slice(0, 20);
   if (!visibleSessions.length) {
@@ -3698,6 +3654,7 @@ function forecastColor() {
   const f = _f();
   if (!f) return '';
   return f.trend === 'up' ? '#f87171' : f.trend === 'down' ? '#4ade80' : '';
+}
 // ── A/B compare renderers ───────────────────────────────────────────────
 // Tiny helpers — keep delta math in one place so stats cards, model table,
 // and project table all format the same way.
@@ -3824,7 +3781,6 @@ function renderProjectCostTableAB(byProjectA, byProjectB) {
   `).join('');
 }
 
-function renderStats(t, prev) {
 // ── Renderers ──────────────────────────────────────────────────────────────
 function renderBudget() {  // eslint-disable-line no-unused-vars
   const b = rawData && rawData.budget;
@@ -3857,7 +3813,7 @@ function _editBudget() {
   }).then(() => loadData());
 }
 
-function renderStats(t) {
+function renderStats(t, prev) {
   const rangeLabel = RANGE_LABELS[selectedRange].toLowerCase();
   const stats = [
     { label: 'Sessions',       value: t.sessions.toLocaleString(), sub: rangeLabel,               delta: prev && _deltaBadge(t.sessions, prev.sessions) },
@@ -4109,6 +4065,7 @@ function renderCacheHit(summary) {  // eslint-disable-line no-unused-vars
     ? `<strong>${under}</strong> session${under === 1 ? "" : "s"} are underusing caching (input &gt; ${fmt(thr)} tok, cache hit &lt; 30%) &mdash; see them tagged in the table.`
     : `No sessions are underusing the prompt cache right now.`;
   el.innerHTML = `<strong>Avg cache hit ratio:</strong> ${avgPct}%. ${tail}`;
+}
 function renderTimeOnTask() {  // eslint-disable-line no-unused-vars
   if (!rawData || !rawData.time_on_task) return;
   const days = rawData.time_on_task;
@@ -4245,8 +4202,7 @@ function renderToolsChart(rows) {  // eslint-disable-line no-unused-vars
       },
     },
   });
-  const names = ranked.map(s => \`\${s.project} (\${s.session_id})\`).join(", ");
-  el.innerHTML = \`<strong>Cost concentration:</strong> top 5 sessions account for <strong>\${pct}%</strong> of spend in the current range. <span style="color:var(--muted)">(\${names})</span>\`;
+}
 let _searchTerm = "";
 function _onSearchInput(v) {  // eslint-disable-line no-unused-vars
   _searchTerm = (v || "").toLowerCase();
@@ -4257,6 +4213,7 @@ function _matchesSearch(s) {
   if (!_searchTerm) return true;
   const fields = [s.project, s.branch, s.session_id, s.session_name, s.model].filter(Boolean);
   return fields.some(f => String(f).toLowerCase().includes(_searchTerm));
+}
 function renderAnomalyBanner() {  // eslint-disable-line no-unused-vars
   const a = rawData && rawData.anomaly;
   const el = document.getElementById("anomaly-banner");
@@ -4265,7 +4222,8 @@ function renderAnomalyBanner() {  // eslint-disable-line no-unused-vars
     return;
   }
   el.style.display = "";
-  el.innerHTML = \`⚠ <strong>Spend spike detected.</strong> Today's spend ($\${a.today.toFixed(2)}) is \${a.ratio}x the 30-day average ($\${a.mean.toFixed(2)}). Did an agent loop go haywire?\`;
+  el.innerHTML = `⚠ <strong>Spend spike detected.</strong> Today's spend ($${a.today.toFixed(2)}) is ${a.ratio}x the 30-day average ($${a.mean.toFixed(2)}). Did an agent loop go haywire?`;
+}
 function renderDowHourHeatmap() {  // eslint-disable-line no-unused-vars
   const grid = rawData && rawData.dow_hour;
   const el = document.getElementById("dow-hour-grid");
@@ -4291,6 +4249,7 @@ function renderDowHourHeatmap() {  // eslint-disable-line no-unused-vars
     }
   }
   el.innerHTML = cells.join("");
+}
 let histoChart = null;
 function renderHistogram() {  // eslint-disable-line no-unused-vars
   const h = rawData && rawData.cost_histogram;
@@ -4319,6 +4278,7 @@ function renderHistogram() {  // eslint-disable-line no-unused-vars
       scales: { x: { ticks: { font: { size: 9 } } }, y: { beginAtZero: true } },
     },
   });
+}
 function renderPlanCard() {  // eslint-disable-line no-unused-vars
   const r = rawData && rawData.plan_recommendation;
   const el = document.getElementById("plan-card");
@@ -4329,7 +4289,7 @@ function renderPlanCard() {  // eslint-disable-line no-unused-vars
   }
   const p = r.plans[r.recommended];
   el.style.display = "";
-  el.innerHTML = \`<strong>Plan recommendation:</strong> at $\${r.month_to_date.toFixed(2)} API-equivalent this month, <strong>\${r.recommended}</strong> ($\${p.price}/mo, includes \${p.included}) would be the cheapest subscription. <span style="color:var(--muted)">Compare: \${Object.entries(r.plans).map(([n, pp]) => n + " $" + pp.price).join(" • ")}</span>\`;
+  el.innerHTML = `<strong>Plan recommendation:</strong> at $${r.month_to_date.toFixed(2)} API-equivalent this month, <strong>${r.recommended}</strong> ($${p.price}/mo, includes ${p.included}) would be the cheapest subscription. <span style="color:var(--muted)">Compare: ${Object.entries(r.plans).map(([n, pp]) => n + " $" + pp.price).join(" • ")}</span>`;
 }
 
 function _openSession(sid) {  // eslint-disable-line no-unused-vars
@@ -4403,6 +4363,7 @@ function _renderSparkline(bins) {  // eslint-disable-line no-unused-vars
   const step = W / bins.length;
   const pts = bins.map((v, i) => `${(i * step).toFixed(1)},${(H - (v / max) * H).toFixed(1)}`).join(" ");
   return `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" style="vertical-align:middle;margin-left:4px;" aria-hidden="true"><polyline fill="none" stroke="var(--accent)" stroke-width="1" points="${pts}"></polyline></svg>`;
+}
 function _renderSensitiveBadge(s) {  // eslint-disable-line no-unused-vars
   // SOFT warning chip — flags sessions whose project/branch matched a
   // sensitive-content regex. Never blocks; just shows a tooltip listing
@@ -4411,6 +4372,7 @@ function _renderSensitiveBadge(s) {  // eslint-disable-line no-unused-vars
   if (!matches || !matches.length) return "";
   const tip = `Sensitive markers matched: ${matches.join(', ')}`;
   return ` <span class="pii-badge" title="${esc(tip)}" aria-label="${esc(tip)}" style="display:inline-block;margin-left:4px;padding:0 5px;border-radius:6px;font-size:10px;line-height:14px;background:rgba(255,159,10,0.18);color:#b06b00;border:1px solid rgba(255,159,10,0.45);cursor:help;vertical-align:middle;">&#9888;</span>`;
+}
 function renderDowngradeSuggestions() {  // eslint-disable-line no-unused-vars
   const el = document.getElementById("downgrade-card");
   if (!el) return;
@@ -4426,6 +4388,7 @@ function renderDowngradeSuggestions() {  // eslint-disable-line no-unused-vars
     `${esc(s.project)} (${esc(s.session_id)} → ${esc(s.suggested_model.replace("claude-", ""))}, save ${fmtCostBig ? fmtCostBig(s.savings_usd) : "$" + s.savings_usd.toFixed(2)})`
   ).join(", ");
   el.innerHTML = `<strong>Downgrade hint:</strong> ${suggestions.length} opus/sonnet session${suggestions.length === 1 ? "" : "s"} could likely have used haiku — potential savings <strong>$${totalSavings.toFixed(2)}</strong> across the database. <span style="color:var(--muted)">Top: ${names}</span>`;
+}
 function renderCache1hOpportunities(opps) {
   const body = document.getElementById('cache-1h-body');
   if (!body) return;
@@ -4440,6 +4403,7 @@ function renderCache1hOpportunities(opps) {
       <td class="cost">${fmtCost(o.current_cost)}</td>
       <td class="cost" title="~40% of current cache-creation cost">${fmtCost(o.estimated_savings_with_1h)}</td>
     </tr>`).join('');
+}
 async function renderInbound() {  // eslint-disable-line no-unused-vars
   const card = document.getElementById("inbound-card");
   if (!card) return;
@@ -4500,20 +4464,15 @@ function renderSessionsTable(sessions) {
       ? `<td class="cost">${fmtCost(cost)}</td>`
       : `<td class="cost-na">n/a</td>`;
     const piiBadge = _renderSensitiveBadge(s);
-    const sessionCell = s.session_name
-      ? `<td><span class="session-name">${esc(s.session_name)}</span> <span class="muted" style="font-family:monospace">(<a href="#" onclick="_openSession('${s.session_id}'); return false;" style="color:var(--accent); text-decoration:none;">${esc(s.session_id)}</a>&hellip;)</span></td>`
-      ? `<td><span class="session-name">${esc(s.session_name)}</span> <span class="muted" style="font-family:monospace">(${esc(s.session_id)}${_renderSparkline(s.sparkline)}&hellip;)</span></td>`
-      : `<td class="muted" style="font-family:monospace">${esc(s.session_id)}&hellip;</td>`;
-      ? `<td><span class="session-name">${esc(s.session_name)}</span> <span class="muted" style="font-family:monospace">(${esc(s.session_id)}&hellip;)</span>${piiBadge}</td>`
-      : `<td class="muted" style="font-family:monospace">${esc(s.session_id)}&hellip;${piiBadge}</td>`;
     const ratioPct = Math.round((s.cache_hit_ratio || 0) * 100);
-    const badge = s.cache_underusing
+    const cacheBadge = s.cache_underusing
       ? ` <span class="cache-warn-badge" title="High input (${fmt(s.input)} tok) but only ${ratioPct}% cache hit — likely paying full price for repeat content.">cache underused</span>`
       : '';
+    const sparkline = _renderSparkline(s.sparkline);
+    const sidLink = `<a href="#" onclick="_openSession('${s.session_id}'); return false;" style="color:var(--accent); text-decoration:none;">${esc(s.session_id)}</a>`;
     const sessionCell = s.session_name
-      ? `<td><span class="session-name">${esc(s.session_name)}</span> <span class="muted" style="font-family:monospace">(${esc(s.session_id)}&hellip;)</span>${badge}</td>`
-      : `<td class="muted" style="font-family:monospace">${esc(s.session_id)}&hellip;${badge}</td>`;
-    return `<tr class="session-row ${selectedSessionId === s.session_id_full ? 'selected' : ''}" data-session-id="${esc(s.session_id_full)}">
+      ? `<td><span class="session-name">${esc(s.session_name)}</span> <span class="muted" style="font-family:monospace">(${sidLink}${sparkline}&hellip;)</span>${piiBadge}${cacheBadge}</td>`
+      : `<td class="muted" style="font-family:monospace">${sidLink}${sparkline}&hellip;${piiBadge}${cacheBadge}</td>`;
     return `<tr class="session-row ${s._abClass || ''} ${selectedSessionId === s.session_id_full ? 'selected' : ''}" data-session-id="${esc(s.session_id_full)}">
       ${sessionCell}
       <td>${projCellHTML(s.project)}</td>
@@ -4815,6 +4774,7 @@ function exportBranchCSV() {
     return [b.project, b.branch, b.sessions, b.turns, b.input, b.output, b.cache_read, b.cache_creation, b.cost.toFixed(4)];
   });
   downloadCSV('branches', header, rows);
+}
 // ── Markdown copy ─────────────────────────────────────────────────────────
 function _mdEscape(v) {
   // Pipes and newlines break GFM tables; replace them.
@@ -4923,15 +4883,23 @@ async function _confirmReset() {  // eslint-disable-line no-unused-vars
     .catch(e => alert("Reset error: " + e));
 }
 
-function triggerRescan() {
+async function triggerRescan() {
   const btn = document.getElementById('rescan-btn');
+  if (!btn) return;
   btn.disabled = true;
   btn.textContent = '\u21bb Scanning...';
   try {
     const resp = await fetch('/api/rescan', { method: 'POST' });
     const d = await resp.json();
     btn.textContent = '\u21bb Rescan (' + d.new + ' new, ' + d.updated + ' updated)';
-    await 
+    await loadData();
+  } catch (e) {
+    btn.textContent = '\u21bb Rescan (error)';
+    console.error('rescan failed:', e);
+  } finally {
+    setTimeout(() => { btn.textContent = '\u21bb Rescan'; btn.disabled = false; }, 3000);
+  }
+}
 
 // Apply localStorage prefs at startup if URL didn't carry any.
 (function bootstrapPrefs() {
@@ -4944,8 +4912,9 @@ function triggerRescan() {
   } catch (e) {}
 })();
 
+let _liveTimer = null;
 loadData();
-    await loadData(); startLivePolling();
+startLivePolling();
 // Keyboard shortcuts: only fire when the user isn't typing in an input.
 document.addEventListener('keydown', (e) => {
   if (e.target && /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
@@ -4979,18 +4948,9 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
-loadData();
-    await loadData(); _populateThemeDropdown();
-  } catch(e) {
-    btn.textContent = '\u21bb Rescan (error)';
-    console.error(e);
-  }
-  setTimeout(() => { btn.textContent = '\u21bb Rescan'; btn.disabled = false; }, 3000);
-}
+_populateThemeDropdown();
 
 // ── Data loading ───────────────────────────────────────────────────────────
-async 
-let _liveTimer = null;
 function startLivePolling() {
   function tick() {
     fetch('/api/live').then(r => r.json()).then(d => {
@@ -5020,7 +4980,7 @@ function startLivePolling() {
   _liveTimer = setInterval(tick, 10000);  // probe every 10s — cheap
 }
 
-function loadData() {
+async function loadData() {
   try {
     const resp = await fetch('/api/data');
     const d = await resp.json();
@@ -5156,7 +5116,6 @@ function scheduleAutoRefresh() {
   }
 }
 
-loadData();
 scheduleAutoRefresh();
 
 // Register service worker so the dashboard is PWA-installable. Guard with
