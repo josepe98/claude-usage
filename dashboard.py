@@ -2773,6 +2773,66 @@ def render_html():
     ).encode("utf-8")
 
 
+
+def _export_raw_turns(limit=200_000, db_path=None):
+    """Return a list of all turns in DB. Limited to avoid eating the whole
+    heap on absurdly large DBs; users with more should use sqlite3 directly."""
+    db = db_path or DB_PATH
+    if not db.exists():
+        return []
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(f"""
+        SELECT session_id, timestamp, model,
+               input_tokens, output_tokens,
+               cache_read_tokens, cache_creation_tokens,
+               tool_name, cwd, message_id
+        FROM turns
+        ORDER BY timestamp ASC
+        LIMIT {int(limit)}
+    """).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def _export_csv(kind, db_path=None):
+    """Return a CSV string for one of: daily, sessions, projects."""
+    import csv, io as _io
+    data = get_dashboard_data(db_path or DB_PATH)
+    out = _io.StringIO()
+    w = csv.writer(out)
+    if kind == "daily":
+        w.writerow(["day", "model", "input", "output", "cache_read", "cache_creation", "turns"])
+        for r in data.get("daily_by_model", []):
+            w.writerow([r["day"], r["model"], r["input"], r["output"],
+                        r["cache_read"], r["cache_creation"], r["turns"]])
+    elif kind == "sessions":
+        w.writerow(["session_id", "session_name", "project", "branch", "last", "model",
+                    "turns", "input", "output", "cache_read", "cache_creation"])
+        for s in data.get("sessions_all", []):
+            w.writerow([s["session_id"], s.get("session_name", ""), s["project"], s["branch"],
+                        s["last"], s["model"], s["turns"], s["input"], s["output"],
+                        s["cache_read"], s["cache_creation"]])
+    elif kind == "projects":
+        # Aggregate sessions by project for a project-level summary.
+        agg = {}
+        for s in data.get("sessions_all", []):
+            p = s["project"]
+            d = agg.setdefault(p, {"sessions": 0, "turns": 0, "input": 0, "output": 0,
+                                   "cache_read": 0, "cache_creation": 0})
+            d["sessions"] += 1
+            for k in ("turns", "input", "output", "cache_read", "cache_creation"):
+                d[k] += s[k]
+        w.writerow(["project", "sessions", "turns", "input", "output", "cache_read", "cache_creation"])
+        for p, d in sorted(agg.items(), key=lambda x: -x[1]["turns"]):
+            w.writerow([p, d["sessions"], d["turns"], d["input"], d["output"],
+                        d["cache_read"], d["cache_creation"]])
+    else:
+        w.writerow(["error"])
+        w.writerow([f"unknown export type: {kind}"])
+    return out.getvalue()
+
+
 class DashboardHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
@@ -2812,6 +2872,36 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+        elif path == "/api/export.json":
+            # Full JSON dump of everything /api/data carries, plus raw turns
+            # so downstream tooling (BI, invoicing scripts) doesn't have to
+            # re-implement aggregation.
+            data = get_dashboard_data()
+            data["turns"] = _export_raw_turns()
+            body = json.dumps(data, indent=2).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Disposition", "attachment; filename=claude-usage.json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif path == "/api/export.csv":
+            # ?type=daily|sessions|projects (default: daily). Streams CSV
+            # without loading more than one section at a time.
+            qs = urlparse(self.path).query
+            kind = "daily"
+            for kv in qs.split("&"):
+                if kv.startswith("type="):
+                    kind = kv.split("=", 1)[1] or "daily"
+            csv_body = _export_csv(kind).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/csv; charset=utf-8")
+            self.send_header(
+                "Content-Disposition", f'attachment; filename=claude-usage-{kind}.csv',
+            )
+            self.send_header("Content-Length", str(len(csv_body)))
+            self.end_headers()
+            self.wfile.write(csv_body)
         elif path == "/api/data":
             data = get_dashboard_data()
             body = json.dumps(data).encode("utf-8")
