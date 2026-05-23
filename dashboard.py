@@ -779,7 +779,7 @@ async function _populateThemeDropdown() {  // eslint-disable-line no-unused-vars
     const themes = await r.json();
     const current = localStorage.getItem("dashboard-theme-id") || "apple";
     sel.innerHTML = themes.map(t =>
-      \`<option value="\${t.id}" \${t.id === current ? "selected" : ""}>\${t.name}</option>\`
+      `<option value="${t.id}" ${t.id === current ? "selected" : ""}>${t.name}</option>`
     ).join("");
     // Cache themes for instant switching without another fetch
     window._cachedThemes = themes;
