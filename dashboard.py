@@ -166,6 +166,36 @@ def get_themes():
     return list(themes.values())
 
 
+
+PROJECT_BUDGETS_PATH = Path.home() / ".claude" / "project-budgets.json"
+
+
+def _load_project_budgets():
+    try:
+        return json.loads(PROJECT_BUDGETS_PATH.read_text())
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_project_budgets(cfg):
+    PROJECT_BUDGETS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    PROJECT_BUDGETS_PATH.write_text(json.dumps(cfg, indent=2, sort_keys=True))
+
+
+def _project_budget_status(per_project_mtd, cfg=None):
+    """Given {project: month_to_date_usd}, return {project: {cap, mtd, pct, state}}."""
+    cfg = cfg or _load_project_budgets()
+    out = {}
+    for proj, cap in cfg.items():
+        if not cap or cap <= 0:
+            continue
+        mtd = per_project_mtd.get(proj, 0)
+        pct = mtd / cap if cap > 0 else 0
+        state = "over" if pct >= 1 else "warn" if pct >= 0.8 else "ok"
+        out[proj] = {"cap": cap, "mtd": round(mtd, 2), "pct": round(pct, 4), "state": state}
+    return out
+
+
 def get_dashboard_data(db_path=DB_PATH):
     if not db_path.exists():
         return {"error": "Database not found. Run: python cli.py scan"}
@@ -278,6 +308,26 @@ def get_dashboard_data(db_path=DB_PATH):
             "cache_creation": r["total_cache_creation"] or 0,
         })
 
+    # Per-project month-to-date for budget alerts
+    from pricing import get_pricing as _gp_pb
+    from datetime import date as _dt_pb
+    _mp_pb = _dt_pb.today().strftime("%Y-%m")
+    _per_proj = {}
+    for r in conn.execute("""
+        SELECT s.project_name as project, t.model,
+               SUM(t.input_tokens) as inp, SUM(t.output_tokens) as out,
+               SUM(t.cache_read_tokens) as cr, SUM(t.cache_creation_tokens) as cw
+        FROM turns t JOIN sessions s ON s.session_id = t.session_id
+        WHERE substr(t.timestamp, 1, 7) = ?
+        GROUP BY s.project_name, t.model
+    """, (_mp_pb,)).fetchall():
+        _p = _gp_pb(r["model"])
+        if not _p:
+            continue
+        _c = ((r["inp"] or 0) * _p["input"] + (r["out"] or 0) * _p["output"]
+              + (r["cr"] or 0) * _p["cache_read"] + (r["cw"] or 0) * _p["cache_write"]) / 1_000_000
+        _per_proj[r["project"]] = _per_proj.get(r["project"], 0) + _c
+    project_budgets = _project_budget_status(_per_proj)
     conn.close()
 
     return {
@@ -285,6 +335,7 @@ def get_dashboard_data(db_path=DB_PATH):
         "daily_by_model":  daily_by_model,
         "hourly_by_model": hourly_by_model,
         "sessions_all":    sessions_all,
+        "project_budgets": project_budgets,
         "generated_at":    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
@@ -1723,6 +1774,27 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
+        if path == "/api/project-budget":
+            length = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(length) if length else b"{}"
+            try:
+                req = json.loads(body)
+            except json.JSONDecodeError:
+                req = {}
+            proj = req.get("project")
+            cap = req.get("monthly_usd")
+            cfg = _load_project_budgets()
+            if proj:
+                if cap is None or cap == 0:
+                    cfg.pop(proj, None)
+                else:
+                    cfg[proj] = float(cap)
+                _save_project_budgets(cfg)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"ok": True, "budgets": cfg}).encode("utf-8"))
+            return
         if path == "/api/rescan":
             # Default: incremental scan (fast, non-destructive).
             # Opt-in full rebuild with ?full=1 — useful when pricing or
