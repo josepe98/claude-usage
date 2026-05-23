@@ -511,6 +511,32 @@ def _budget_status(month_to_date_usd, cfg=None):
 def _save_tags(tags):
     TAGS_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     TAGS_CONFIG_PATH.write_text(json.dumps(tags, indent=2, sort_keys=True))
+def _dow_hour_heatmap(conn):
+    """Return a 7x24 grid: weekday (0=Mon) x hour (0-23) -> {turns, tokens}.
+
+    Uses sqlite's strftime to extract dow + hour from the UTC timestamp.
+    Caller's UI can shift the timezone if needed; we keep UTC for the
+    server-side aggregation."""
+    rows = conn.execute("""
+        SELECT
+            CAST(strftime('%w', timestamp) as INTEGER) as dow,
+            CAST(strftime('%H', timestamp) as INTEGER) as hour,
+            COUNT(*) as turns,
+            SUM(input_tokens + output_tokens) as tokens
+        FROM turns
+        WHERE timestamp IS NOT NULL
+        GROUP BY dow, hour
+    """).fetchall()
+    grid = [[{"turns": 0, "tokens": 0} for _ in range(24)] for _ in range(7)]
+    # sqlite %w is 0=Sun .. 6=Sat; we re-index to 0=Mon..6=Sun so weekdays
+    # are contiguous in the UI.
+    remap = {0: 6, 1: 0, 2: 1, 3: 2, 4: 3, 5: 4, 6: 5}
+    for r in rows:
+        d = remap.get(r["dow"], 0)
+        h = r["hour"]
+        grid[d][h]["turns"] += r["turns"] or 0
+        grid[d][h]["tokens"] += r["tokens"] or 0
+    return grid
 
 
 def get_dashboard_data(db_path=DB_PATH):
@@ -684,6 +710,7 @@ def get_dashboard_data(db_path=DB_PATH):
     _tags_map = _load_tags()
     for s in sessions_all:
         s["tags"] = _tags_map.get(s["session_id"], [])
+    dow_hour = _dow_hour_heatmap(conn)
     conn.close()
 
     return {
@@ -696,6 +723,7 @@ def get_dashboard_data(db_path=DB_PATH):
         "forecast":        forecast,
         "budget":          budget_status_data,
         "anomaly":         anomaly,
+        "dow_hour":        dow_hour,
         "generated_at":    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
@@ -1294,6 +1322,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <h2 id="daily-chart-title">Daily Token Usage</h2>
       <div class="chart-wrap tall"><canvas id="chart-daily"></canvas></div>
     </div>
+    <div class="chart-card wide">
+      <h2>Activity by Day-of-Week × Hour (UTC)</h2>
+      <div id="dow-hour-grid" style="display: grid; grid-template-columns: 30px repeat(24, 1fr); gap: 2px; font-size: 10px; color: var(--muted);"></div>
+    </div>
+
     <div class="chart-card wide">
       <div class="chart-header">
         <h2>Activity (last 365 days)</h2>
@@ -2045,6 +2078,7 @@ function applyFilter() {
   );
   renderToolsChart(filteredTools);
   renderAnomalyBanner();
+  renderDowHourHeatmap();
   lastFilteredSessions = sortSessions(filteredSessions);
   lastByProject = sortProjects(byProject);
   lastByProjectBranch = sortProjectBranch(byProjectBranch);
@@ -2568,6 +2602,31 @@ function renderAnomalyBanner() {  // eslint-disable-line no-unused-vars
   }
   el.style.display = "";
   el.innerHTML = \`⚠ <strong>Spend spike detected.</strong> Today's spend ($\${a.today.toFixed(2)}) is \${a.ratio}x the 30-day average ($\${a.mean.toFixed(2)}). Did an agent loop go haywire?\`;
+function renderDowHourHeatmap() {  // eslint-disable-line no-unused-vars
+  const grid = rawData && rawData.dow_hour;
+  const el = document.getElementById("dow-hour-grid");
+  if (!el || !grid) return;
+  // Find max for colour scaling
+  let max = 0;
+  for (let d = 0; d < 7; d++) for (let h = 0; h < 24; h++) max = Math.max(max, grid[d][h].turns);
+  const days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+  const cells = [];
+  // Top-left empty corner + hour header
+  cells.push(`<div></div>`);
+  for (let h = 0; h < 24; h++) {
+    cells.push(`<div style="text-align:center;${h % 6 ? "" : "color:var(--text);"}">${h % 6 ? "" : h}</div>`);
+  }
+  for (let d = 0; d < 7; d++) {
+    cells.push(`<div style="text-align:right;padding-right:4px;color:var(--text);">${days[d]}</div>`);
+    for (let h = 0; h < 24; h++) {
+      const v = grid[d][h];
+      const intensity = max > 0 ? v.turns / max : 0;
+      const bg = `rgba(217,119,87,${0.05 + intensity * 0.85})`;
+      const title = `${days[d]} ${h}:00 UTC — ${v.turns} turns, ${(v.tokens||0).toLocaleString()} tokens`;
+      cells.push(`<div style="aspect-ratio:1/1;background:${bg};border-radius:2px;" title="${title}"></div>`);
+    }
+  }
+  el.innerHTML = cells.join("");
 }
 
 function renderProjectChart(byProject) {
