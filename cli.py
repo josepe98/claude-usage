@@ -1249,6 +1249,256 @@ def cmd_alerts(*args):
     else:
         print("Unknown alerts subcommand. Use: list | test | trigger <name>")
         sys.exit(1)
+# ── Workbench / Console export import ─────────────────────────────────────────
+
+def _normalize_workbench_record(rec, fallback_ts=None):
+    """Coerce one Console/Workbench export entry into the turn shape.
+
+    The Anthropic Console export format isn't officially documented; this
+    parser accepts the common shapes that appear in real exports:
+
+      Top-level usage fields:
+          model | model_name | model_id
+          input_tokens | inputTokens | usage.input_tokens
+          output_tokens | outputTokens | usage.output_tokens
+          cache_read_input_tokens | cacheReadInputTokens
+          cache_creation_input_tokens | cacheCreationInputTokens
+          timestamp | created_at | createdAt | created  (ISO 8601)
+          id | message_id | run_id
+
+      Variants:
+          - usage may be nested under `usage` or flat
+          - timestamps may be ISO strings or unix epoch seconds/ms
+          - extra fields are ignored
+
+    Returns a dict with keys matching scanner.insert_turns input, or
+    None if the record can't be parsed (missing model or no token counts).
+    """
+    if not isinstance(rec, dict):
+        return None
+
+    # Some exports nest usage under "usage" sub-object
+    usage = rec.get("usage") if isinstance(rec.get("usage"), dict) else {}
+
+    def pick(*keys):
+        for k in keys:
+            if k in rec and rec[k] is not None:
+                return rec[k]
+            if k in usage and usage[k] is not None:
+                return usage[k]
+        return None
+
+    model = pick("model", "model_name", "model_id")
+    if not model or not isinstance(model, str):
+        return None
+
+    def as_int(v):
+        if v is None:
+            return 0
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return 0
+
+    input_tokens = as_int(pick("input_tokens", "inputTokens", "prompt_tokens"))
+    output_tokens = as_int(pick("output_tokens", "outputTokens", "completion_tokens"))
+    cache_read = as_int(pick("cache_read_input_tokens", "cacheReadInputTokens"))
+    cache_creation = as_int(pick("cache_creation_input_tokens", "cacheCreationInputTokens"))
+
+    if input_tokens + output_tokens + cache_read + cache_creation == 0:
+        # No usage to record
+        return None
+
+    # Timestamp: accept ISO 8601 or unix epoch (s or ms)
+    ts_raw = pick("timestamp", "created_at", "createdAt", "created")
+    ts = _coerce_timestamp(ts_raw) or fallback_ts or datetime.utcnow().isoformat()
+
+    return {
+        "model": model.split("[", 1)[0],  # strip tier hints like [1m]
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cache_read_tokens": cache_read,
+        "cache_creation_tokens": cache_creation,
+        "cache_1h_tokens": 0,
+        "timestamp": ts,
+        "tool_name": None,
+    }
+
+
+def _coerce_timestamp(value):
+    """Accept ISO strings, unix seconds, unix ms, or datetime. Return ISO string."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, (int, float)):
+        # Heuristic: ms vs seconds
+        v = float(value)
+        if v > 10_000_000_000:  # > year 2286 in seconds → must be ms
+            v = v / 1000.0
+        try:
+            return datetime.utcfromtimestamp(v).isoformat()
+        except (OSError, OverflowError, ValueError):
+            return None
+    if isinstance(value, str):
+        # Trust ISO-looking strings as-is; otherwise try to parse
+        s = value.strip()
+        if not s:
+            return None
+        # Quick sanity: must start with a digit (year)
+        if not s[0].isdigit():
+            return None
+        return s
+    return None
+
+
+def cmd_import_workbench(path):
+    """Import an Anthropic Console / Workbench JSON export into the DB.
+
+    Console export format (best-effort — Anthropic hasn't published a stable
+    schema). The importer accepts a JSON file containing one of:
+
+      - A top-level array of run/message objects
+      - An object with a "runs", "messages", or "data" array
+      - A single run/message object
+
+    Each record is normalized into a `turns` row with:
+      project_name = "Workbench"
+      session_id   = "wb-<sha1(file)[:12]>"
+      git_branch   = ""
+      message_id   = "wb-<filename>-<line_index>"  (idempotency key)
+
+    Re-importing the same file is a no-op because turns are deduped by
+    message_id via the unique partial index on `turns.message_id`.
+    """
+    import json
+    import hashlib
+    from scanner import get_db, init_db, upsert_sessions, insert_turns
+
+    file_path = Path(path)
+    if not file_path.exists():
+        print(f"Error: file not found: {path}")
+        sys.exit(1)
+
+    try:
+        with open(file_path, encoding="utf-8", errors="replace") as f:
+            raw = f.read()
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        print(f"Error: {path} is not valid JSON ({e})")
+        sys.exit(1)
+
+    # Coerce into a flat list of records, regardless of wrapper shape
+    if isinstance(data, list):
+        records = data
+    elif isinstance(data, dict):
+        for key in ("runs", "messages", "data", "entries", "items"):
+            if isinstance(data.get(key), list):
+                records = data[key]
+                break
+        else:
+            # Treat the whole object as a single record
+            records = [data]
+    else:
+        print(f"Error: unsupported JSON structure in {path} (expected array or object)")
+        sys.exit(1)
+
+    # Stable session id derived from file contents — re-importing the same
+    # exact file maps to the same session row.
+    file_hash = hashlib.sha1(file_path.read_bytes()).hexdigest()[:12]
+    session_id = f"wb-{file_hash}"
+    file_stem = file_path.stem
+
+    turns = []
+    skipped = 0
+    for idx, rec in enumerate(records):
+        normalized = _normalize_workbench_record(rec)
+        if normalized is None:
+            skipped += 1
+            continue
+        normalized["session_id"] = session_id
+        normalized["cwd"] = "Workbench"
+        normalized["message_id"] = f"wb-{file_stem}-{idx}"
+        turns.append(normalized)
+
+    if not turns:
+        print(f"No importable entries found in {path} ({skipped} skipped).")
+        return
+
+    # Build a single session row spanning all imported turns
+    timestamps = [t["timestamp"] for t in turns if t.get("timestamp")]
+    first_ts = min(timestamps) if timestamps else ""
+    last_ts = max(timestamps) if timestamps else ""
+
+    # Pick the most common model as the session-level model label
+    from collections import Counter
+    model_counts = Counter(t["model"] for t in turns if t["model"])
+    session_model = model_counts.most_common(1)[0][0] if model_counts else None
+
+    session_row = {
+        "session_id": session_id,
+        "project_name": "Workbench",
+        "first_timestamp": first_ts,
+        "last_timestamp": last_ts,
+        "git_branch": "",
+        "model": session_model,
+        "total_input_tokens": sum(t["input_tokens"] for t in turns),
+        "total_output_tokens": sum(t["output_tokens"] for t in turns),
+        "total_cache_read": sum(t["cache_read_tokens"] for t in turns),
+        "total_cache_creation": sum(t["cache_creation_tokens"] for t in turns),
+        "total_cache_1h": 0,
+        "turn_count": len(turns),
+        "session_name": f"Workbench {file_stem}",
+    }
+
+    conn = get_db(DB_PATH)
+    init_db(conn)
+
+    # Detect how many of these message_ids are already in the DB so we can
+    # report "imported" vs "already present" accurately.
+    msg_ids = [t["message_id"] for t in turns]
+    placeholders = ",".join("?" * len(msg_ids))
+    existing_rows = conn.execute(
+        f"SELECT message_id FROM turns WHERE message_id IN ({placeholders})",
+        msg_ids,
+    ).fetchall()
+    already_present = {row[0] for row in existing_rows}
+    new_turn_count = sum(1 for mid in msg_ids if mid not in already_present)
+
+    upsert_sessions(conn, [session_row])
+    insert_turns(conn, turns)
+
+    # Recompute session totals from actual turns so totals stay accurate
+    # whether this is the first import or a re-import.
+    conn.execute("""
+        UPDATE sessions SET
+            total_input_tokens   = COALESCE((SELECT SUM(input_tokens)         FROM turns WHERE turns.session_id = sessions.session_id), 0),
+            total_output_tokens  = COALESCE((SELECT SUM(output_tokens)        FROM turns WHERE turns.session_id = sessions.session_id), 0),
+            total_cache_read     = COALESCE((SELECT SUM(cache_read_tokens)    FROM turns WHERE turns.session_id = sessions.session_id), 0),
+            total_cache_creation = COALESCE((SELECT SUM(cache_creation_tokens)FROM turns WHERE turns.session_id = sessions.session_id), 0),
+            total_cache_1h       = COALESCE((SELECT SUM(cache_1h_tokens)      FROM turns WHERE turns.session_id = sessions.session_id), 0),
+            turn_count           = COALESCE((SELECT COUNT(*)                  FROM turns WHERE turns.session_id = sessions.session_id), 0)
+        WHERE session_id = ?
+    """, (session_id,))
+    conn.commit()
+    conn.close()
+
+    total_tokens = sum(
+        t["input_tokens"] + t["output_tokens"]
+        + t["cache_read_tokens"] + t["cache_creation_tokens"]
+        for t in turns
+    )
+
+    print()
+    print(f"  Workbench import: {file_path.name}")
+    hr()
+    print(f"  Imported entries:    {new_turn_count}")
+    print(f"  Already present:     {len(already_present)}")
+    print(f"  Skipped (malformed): {skipped}")
+    print(f"  Total tokens:        {fmt(total_tokens)}")
+    print(f"  Session id:          {session_id}")
+    hr()
+    print()
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -1270,6 +1520,7 @@ Usage:
   python3 cli.py install-git-hook [--global]      Install post-commit hook (commit -> session trace)
   python3 cli.py tray [--url URL]                 Launch tray / menu-bar app
   python3 cli.py alerts <list|test|trigger NAME>  Manage custom alert rules
+  python3 cli.py import-workbench <PATH>          Import an Anthropic Console/Workbench JSON export
 """
 
 COMMANDS = {
@@ -1288,6 +1539,7 @@ COMMANDS = {
     "install-git-hook": cmd_install_git_hook,
     "tray": cmd_tray,
     "alerts": cmd_alerts,
+    "import-workbench": cmd_import_workbench,
 }
 
 def parse_named_arg(args, flag):
@@ -1342,5 +1594,10 @@ if __name__ == "__main__":
         )
     elif command == "tray":
         cmd_tray(url=parse_named_arg(rest, "--url"))
+    elif command == "import-workbench":
+        if not rest:
+            print("Usage: python3 cli.py import-workbench <path/to/export.json>")
+            sys.exit(1)
+        cmd_import_workbench(rest[0])
     else:
         COMMANDS[command]()
