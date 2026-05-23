@@ -324,7 +324,7 @@ def cmd_stats():
     conn.close()
 
 
-def cmd_dashboard(projects_dir=None, host=None, port=None):
+def cmd_dashboard(projects_dir=None, host=None, port=None, share=False):
     import webbrowser
     import threading
     import time
@@ -344,7 +344,20 @@ def cmd_dashboard(projects_dir=None, host=None, port=None):
 
     t = threading.Thread(target=open_browser, daemon=True)
     t.start()
-    serve(host=host, port=port)
+    share_token = None
+    if share:
+        import secrets
+        share_token = secrets.token_urlsafe(16)
+        bind_host = host or "127.0.0.1"
+        bind_port = port or "8080"
+        print()
+        print("Dashboard running in SHARE mode (read-only).")
+        print(f"  http://{bind_host}:{bind_port}/?token={share_token}")
+        print()
+        print("Share this URL with anyone who should see the dashboard.")
+        print("Rescan + budget edit are disabled while a token is set.")
+        print()
+    serve(host=host, port=port, share_token=share_token)
 
 
 # ── Theme command ──────────────────────────────────────────────────────────────
@@ -564,6 +577,7 @@ if __name__ == "__main__":
             projects_dir=projects_dir,
             host=parse_named_arg(rest, "--host"),
             port=parse_named_arg(rest, "--port"),
+            share="--share" in rest,
         )
     elif command == "scan" and projects_dir:
         cmd_scan(projects_dir=projects_dir)
