@@ -9,7 +9,15 @@ Claude Code writes detailed usage logs locally — token counts, models, session
 
 ![Claude Usage Dashboard](docs/screenshot.png)
 
-**Created by:** [The Product Compass Newsletter](https://www.productcompass.pm)
+**Originally created by:** [The Product Compass Newsletter](https://www.productcompass.pm)  
+**This fork** ([josepe98/claude-usage](https://github.com/josepe98/claude-usage)) is actively maintained and includes bug fixes and features not yet merged upstream. PRs welcome.
+
+> **What's different here vs [phuryn/claude-usage](https://github.com/phuryn/claude-usage)**
+> - **Fixed:** Hourly chart crash — dashboard went blank when touching any filter ([#74](https://github.com/phuryn/claude-usage/issues/74))
+> - **Fixed:** Blank dashboard for users with non-standard model names ([#76](https://github.com/phuryn/claude-usage/issues/76), [#106](https://github.com/phuryn/claude-usage/issues/106))
+> - **Fixed:** Bookmarkable URLs (`?range=30d`) returning 404 ([#80](https://github.com/phuryn/claude-usage/issues/80))
+> - **Fixed:** Concurrent requests blocked — slow data loads no longer freeze the dashboard ([#78](https://github.com/phuryn/claude-usage/issues/78))
+> - **New:** Appearance gallery with 5 bundled themes (Apple, Linear, Vercel, Notion, Stripe) at `/themes`
 
 ---
 
@@ -40,14 +48,14 @@ No `pip install`, no virtual environment, no build step.
 
 ### Windows
 ```
-git clone https://github.com/phuryn/claude-usage
+git clone https://github.com/josepe98/claude-usage
 cd claude-usage
 python cli.py dashboard
 ```
 
 ### macOS / Linux
 ```
-git clone https://github.com/phuryn/claude-usage
+git clone https://github.com/josepe98/claude-usage
 cd claude-usage
 python3 cli.py dashboard
 ```
@@ -79,6 +87,12 @@ HOST=0.0.0.0 PORT=9000 python cli.py dashboard
 
 # Scan a custom projects directory
 python cli.py scan --projects-dir /path/to/transcripts
+
+# List available themes
+python cli.py theme list
+
+# Apply a theme (apple, linear, vercel, notion, stripe)
+python cli.py theme set linear
 ```
 
 The scanner is incremental — it tracks each file's path and modification time, so re-running `scan` is fast and only processes new or changed files.
@@ -125,4 +139,4 @@ Costs are calculated using **Anthropic API pricing as of April 2026** ([claude.c
 |------|---------|
 | `scanner.py` | Parses JSONL transcripts, writes to `~/.claude/usage.db` |
 | `dashboard.py` | HTTP server + single-page HTML/JS dashboard |
-| `cli.py` | `scan`, `today`, `stats`, `dashboard` commands |
+| `cli.py` | `scan`, `today`, `stats`, `dashboard`, `theme` commands |
