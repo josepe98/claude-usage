@@ -7,15 +7,15 @@ Source: https://docs.claude.com/en/docs/about-claude/pricing
 """
 
 PRICING = {
-    "claude-opus-4-7":   {"input": 5.00, "output": 25.00, "cache_read": 0.50, "cache_write": 6.25},
-    "claude-opus-4-6":   {"input": 5.00, "output": 25.00, "cache_read": 0.50, "cache_write": 6.25},
-    "claude-opus-4-5":   {"input": 5.00, "output": 25.00, "cache_read": 0.50, "cache_write": 6.25},
-    "claude-sonnet-4-7": {"input": 3.00, "output": 15.00, "cache_read": 0.30, "cache_write": 3.75},
-    "claude-sonnet-4-6": {"input": 3.00, "output": 15.00, "cache_read": 0.30, "cache_write": 3.75},
-    "claude-sonnet-4-5": {"input": 3.00, "output": 15.00, "cache_read": 0.30, "cache_write": 3.75},
-    "claude-haiku-4-7":  {"input": 1.00, "output":  5.00, "cache_read": 0.10, "cache_write": 1.25},
-    "claude-haiku-4-6":  {"input": 1.00, "output":  5.00, "cache_read": 0.10, "cache_write": 1.25},
-    "claude-haiku-4-5":  {"input": 1.00, "output":  5.00, "cache_read": 0.10, "cache_write": 1.25},
+    "claude-opus-4-7":   {"input": 5.00, "output": 25.00, "cache_read": 0.50, "cache_write": 6.25, "cache_write_5m": 6.25, "cache_write_1h": 10.0},
+    "claude-opus-4-6":   {"input": 5.00, "output": 25.00, "cache_read": 0.50, "cache_write": 6.25, "cache_write_5m": 6.25, "cache_write_1h": 10.0},
+    "claude-opus-4-5":   {"input": 5.00, "output": 25.00, "cache_read": 0.50, "cache_write": 6.25, "cache_write_5m": 6.25, "cache_write_1h": 10.0},
+    "claude-sonnet-4-7": {"input": 3.00, "output": 15.00, "cache_read": 0.30, "cache_write": 3.75, "cache_write_5m": 3.75, "cache_write_1h": 6.0},
+    "claude-sonnet-4-6": {"input": 3.00, "output": 15.00, "cache_read": 0.30, "cache_write": 3.75, "cache_write_5m": 3.75, "cache_write_1h": 6.0},
+    "claude-sonnet-4-5": {"input": 3.00, "output": 15.00, "cache_read": 0.30, "cache_write": 3.75, "cache_write_5m": 3.75, "cache_write_1h": 6.0},
+    "claude-haiku-4-7":  {"input": 1.00, "output":  5.00, "cache_read": 0.10, "cache_write": 1.25, "cache_write_5m": 1.25, "cache_write_1h": 2.0},
+    "claude-haiku-4-6":  {"input": 1.00, "output":  5.00, "cache_read": 0.10, "cache_write": 1.25, "cache_write_5m": 1.25, "cache_write_1h": 2.0},
+    "claude-haiku-4-5":  {"input": 1.00, "output":  5.00, "cache_read": 0.10, "cache_write": 1.25, "cache_write_5m": 1.25, "cache_write_1h": 2.0},
 }
 
 
@@ -43,14 +43,21 @@ def get_pricing(model):
     return None
 
 
-def calc_cost(model, inp, out, cache_read, cache_creation):
-    """Cost in USD for one batch of token usage. Returns 0 for unknown models."""
+def calc_cost(model, inp, out, cache_read, cache_creation, cache_1h=0):
+    """Cost in USD for one batch of token usage. Returns 0 for unknown models.
+
+    `cache_creation` is the 5-minute ephemeral cache write count; `cache_1h`
+    is the 1-hour tier, billed at 2.0x base input (vs 1.25x for 5m).
+    The 1h parameter is kwarg-only (positional default 0) so existing
+    callers stay source-compatible.
+    """
     p = get_pricing(model)
     if p is None:
         return 0.0
     return (
-        (inp or 0)            * p["input"]       / 1_000_000
-        + (out or 0)          * p["output"]      / 1_000_000
-        + (cache_read or 0)   * p["cache_read"]  / 1_000_000
-        + (cache_creation or 0) * p["cache_write"] / 1_000_000
+        (inp or 0)            * p["input"]          / 1_000_000
+        + (out or 0)          * p["output"]         / 1_000_000
+        + (cache_read or 0)   * p["cache_read"]     / 1_000_000
+        + (cache_creation or 0) * p["cache_write_5m"] / 1_000_000
+        + (cache_1h or 0)     * p["cache_write_1h"] / 1_000_000
     )
