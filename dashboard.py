@@ -379,26 +379,28 @@ def get_dashboard_data(db_path=None):
         "turns":  r["turns"] or 0,
     } for r in hourly_rows]
 
-    # ── All sessions (client filters by range and model) ──────────────────────
-    # session_name may be missing on older DB schemas; fall back gracefully.
+    # ── All sessions (client filters by range, model, and account) ────────────
+    # session_name / account may be missing on older DB schemas; fall back gracefully.
     try:
         session_rows = conn.execute("""
             SELECT
                 session_id, project_name, first_timestamp, last_timestamp,
                 total_input_tokens, total_output_tokens,
                 total_cache_read, total_cache_creation, model, turn_count,
-                git_branch, session_name
+                git_branch, session_name,
+                COALESCE(NULLIF(account, ''), 'default') AS account
             FROM sessions
             ORDER BY last_timestamp DESC
         """).fetchall()
     except sqlite3.OperationalError:
-        # Pre-migration DB: synthesise session_name=None
+        # Pre-migration DB: synthesise session_name=None and account='default'
         session_rows = conn.execute("""
             SELECT
                 session_id, project_name, first_timestamp, last_timestamp,
                 total_input_tokens, total_output_tokens,
                 total_cache_read, total_cache_creation, model, turn_count,
-                git_branch, NULL AS session_name
+                git_branch, NULL AS session_name,
+                'default' AS account
             FROM sessions
             ORDER BY last_timestamp DESC
         """).fetchall()
@@ -427,6 +429,7 @@ def get_dashboard_data(db_path=None):
             "output":        r["total_output_tokens"] or 0,
             "cache_read":    r["total_cache_read"] or 0,
             "cache_creation": r["total_cache_creation"] or 0,
+            "account":       r["account"] or "default",
         })
 
     # Plan comparison — compute month-to-date USD inline.
@@ -457,15 +460,28 @@ def get_dashboard_data(db_path=None):
     streak = _compute_streak(conn)
     conn.close()
 
+    # ── Account summary (sessions + tokens per account, all-time) ─────────────
+    # Cost can't be computed here without duplicating the JS pricing table; the
+    # client recomputes per-account cost after filtering. We include token totals
+    # so an integration consuming the JSON has something useful out of the box.
+    accounts_map = {}
+    for s in sessions_all:
+        acct = s.get("account") or "default"
+        a = accounts_map.setdefault(acct, {"name": acct, "sessions": 0, "tokens": 0})
+        a["sessions"] += 1
+        a["tokens"] += (s["input"] + s["output"] + s["cache_read"] + s["cache_creation"])
+    accounts = sorted(accounts_map.values(), key=lambda x: (-x["sessions"], x["name"]))
+
     return {
         "all_models":      all_models,
         "daily_by_model":  daily_by_model,
         "hourly_by_model": hourly_by_model,
         "sessions_all":    sessions_all,
         "plan_recommendation": plan_recommendation,
-        "dow_hour":        dow_hour,
-        "streak":          streak,
-        "generated_at":       datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "dow_hour":            dow_hour,
+        "streak":              streak,
+        "accounts":            accounts,
+        "generated_at":        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
 
@@ -1129,6 +1145,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <div id="model-checkboxes"></div>
     <button class="filter-btn" onclick="selectAllModels()">All</button>
     <button class="filter-btn" onclick="clearAllModels()">None</button>
+    <div class="filter-sep" id="accounts-sep" style="display:none"></div>
+    <div class="filter-label" id="accounts-label" style="display:none">Account</div>
+    <select id="account-select" onchange="onAccountChange(this.value)" style="display:none; padding: 4px 10px; border-radius: 980px; border: 1px solid rgba(0,0,0,0.12); background: transparent; color: var(--text); font-size: 12px; cursor: pointer; letter-spacing: -0.12px;"></select>
   </div>
   <div class="filter-row">
     <div class="filter-label">Range</div>
@@ -1368,6 +1387,7 @@ function _resetPrefs() {
 }
 
 let selectedRange = (_loadPrefs().range) || '30d';
+let selectedAccount = (_loadPrefs().account) || 'all';  // 'all' or an account name
 let selectedSessionId = null;
 let charts = {};
 let sessionSortCol = 'last';
@@ -1549,6 +1569,45 @@ function setHourlyTZ(mode) {
   applyFilter();
 }
 
+// ── Account filter ─────────────────────────────────────────────────────────
+function readURLAccount() {
+  const p = new URLSearchParams(window.location.search).get('account');
+  return p || 'all';
+}
+
+function buildAccountUI(accounts) {
+  // Hide the dropdown entirely when the user only has one account — it would
+  // be a no-op control otherwise. The "all" option is implicit in that case.
+  const sel = document.getElementById('account-select');
+  const lbl = document.getElementById('accounts-label');
+  const sep = document.getElementById('accounts-sep');
+  if (!accounts || accounts.length <= 1) {
+    sel.style.display = 'none';
+    lbl.style.display = 'none';
+    sep.style.display = 'none';
+    selectedAccount = 'all';
+    return;
+  }
+  sel.style.display = '';
+  lbl.style.display = '';
+  sep.style.display = '';
+  const opts = ['<option value="all">All accounts</option>']
+    .concat(accounts.map(a => `<option value="${esc(a.name)}">${esc(a.name)} (${a.sessions})</option>`));
+  sel.innerHTML = opts.join('');
+  // Restore saved/URL selection, falling back to "all" if it no longer exists.
+  const wanted = readURLAccount();
+  const valid = wanted === 'all' || accounts.some(a => a.name === wanted);
+  selectedAccount = valid ? wanted : 'all';
+  sel.value = selectedAccount;
+}
+
+function onAccountChange(value) {
+  selectedAccount = value || 'all';
+  _savePrefs({ account: selectedAccount });
+  updateURL();
+  applyFilter();
+}
+
 // ── Model filter ───────────────────────────────────────────────────────────
 function modelPriority(m) {
   const ml = m.toLowerCase();
@@ -1620,6 +1679,7 @@ function updateURL() {
   const params = new URLSearchParams();
   if (selectedRange !== '30d') params.set('range', selectedRange);
   if (!isDefaultModelSelection(allModels)) params.set('models', Array.from(selectedModels).join(','));
+  if (selectedAccount && selectedAccount !== 'all') params.set('account', selectedAccount);
   const search = params.toString() ? '?' + params.toString() : '';
   history.replaceState(null, '', window.location.pathname + search);
 }
@@ -1690,8 +1750,10 @@ function applyFilter() {
       prevTotals.turns  += r.turns;
     }
     // Sessions: count sessions whose last_date is in the previous window
+    const inAccountPrev = (s) => selectedAccount === 'all' || (s.account || 'default') === selectedAccount;
     for (const s of rawData.sessions_all) {
       if (!selectedModels.has(s.model)) continue;
+      if (!inAccountPrev(s)) continue;
       if (s.last_date >= prevStart && s.last_date <= prevEnd) prevSessIds.add(s.session_id);
     }
     prevTotals.sessions = prevSessIds.size;
@@ -1725,9 +1787,10 @@ function applyFilter() {
     m.turns          += r.turns;
   }
 
-  // Filter sessions by model + date range
+  // Filter sessions by model + date range + account + search
+  const inAccount = (s) => selectedAccount === 'all' || (s.account || 'default') === selectedAccount;
   const filteredSessions = rawData.sessions_all.filter(s => _matchesSearch(s) &&
-    selectedModels.has(s.model) && (!start || s.last_date >= start) && (!end || s.last_date <= end)
+    selectedModels.has(s.model) && (!start || s.last_date >= start) && (!end || s.last_date <= end) && inAccount(s)
   );
 
   // Add session counts into modelMap
@@ -2710,6 +2773,8 @@ async function loadData() {
       );
       // Build model filter (reads URL for model selection too)
       buildFilterUI(d.all_models);
+      // Build account dropdown (reads URL/prefs; hides itself when only 1 account)
+      buildAccountUI(d.accounts || []);
       updateSortIcons();
       updateModelSortIcons();
       updateProjectSortIcons();
