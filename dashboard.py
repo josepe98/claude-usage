@@ -1724,13 +1724,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = urlparse(self.path).path
         if path == "/api/rescan":
-            # Full rebuild: delete DB and rescan from scratch.
+            # Default: incremental scan (fast, non-destructive).
+            # Opt-in full rebuild with ?full=1 — useful when pricing or
+            # parsing logic changes and historical rows need to be redone.
             # Pass DB_PATH / DEFAULT_PROJECTS_DIRS explicitly so tests that
             # patch the module globals are honored (scan's defaults are
             # frozen at def time and would otherwise target the real paths).
             import scanner
             db_path = DB_PATH
-            if db_path.exists():
+            full = "full=1" in (urlparse(self.path).query or "")
+            if full and db_path.exists():
                 db_path.unlink()
             result = scanner.scan(
                 db_path=db_path,
@@ -1751,8 +1754,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
 def serve(host=None, port=None):
     host = host or os.environ.get("HOST", "localhost")
     port = port or int(os.environ.get("PORT", "8080"))
+    ThreadingHTTPServer.allow_reuse_address = True
     server = ThreadingHTTPServer((host, port), DashboardHandler)
     print(f"Dashboard running at http://{host}:{port}")
+    if host not in ("localhost", "127.0.0.1", "::1"):
+        print(f"  WARNING: bound to {host} — no authentication. "
+              "Anyone reachable on this interface can read your project history "
+              "and trigger /api/rescan.")
     print("Press Ctrl+C to stop.")
     try:
         server.serve_forever()

@@ -352,8 +352,13 @@ def upsert_sessions(conn, sessions):
 
 
 def insert_turns(conn, turns):
+    # INSERT OR REPLACE: if a later record arrives for the same message_id
+    # (Claude streams multiple records per message — the last has the final
+    # usage tallies), overwrite the earlier partial row. INSERT OR IGNORE
+    # would lock in stale partial counts when the streaming boundary fell
+    # between two incremental scans.
     conn.executemany("""
-        INSERT OR IGNORE INTO turns
+        INSERT OR REPLACE INTO turns
             (session_id, timestamp, model, input_tokens, output_tokens,
              cache_read_tokens, cache_creation_tokens, tool_name, cwd, message_id)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -580,8 +585,8 @@ def scan(projects_dir=None, projects_dirs=None, db_path=DB_PATH, verbose=True):
         conn.commit()
 
     # Recompute session totals from actual turns in DB.
-    # This ensures correctness when INSERT OR IGNORE skips duplicate turns
-    # but upsert_sessions had already added their tokens additively.
+    # This ensures session totals stay consistent after INSERT OR REPLACE
+    # overwrites partial streaming rows with final tallies.
     if new_files or updated_files:
         conn.execute("""
             UPDATE sessions SET
