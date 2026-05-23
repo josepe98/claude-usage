@@ -27,8 +27,60 @@ def _git_short_hash():
 
 GIT_HASH = _git_short_hash()
 
-DB_PATH    = Path.home() / ".claude" / "usage.db"
-THEMES_DIR = Path.home() / ".claude" / "claude-usage" / "themes"
+DB_PATH               = Path.home() / ".claude" / "usage.db"
+THEMES_DIR            = Path.home() / ".claude" / "claude-usage" / "themes"
+PROJECT_ALIASES_PATH  = Path.home() / ".claude" / "project-names.json"
+
+
+# ── Project display name overrides ────────────────────────────────────────────
+def _load_project_aliases(path=None):
+    """Load raw_name -> display_name mapping from ~/.claude/project-names.json.
+
+    Returns an empty dict if the file is missing, malformed, or not a plain
+    string-to-string object. Never raises — alias support is a soft feature
+    and a corrupt file must not break the dashboard.
+    """
+    p = Path(path) if path is not None else PROJECT_ALIASES_PATH
+    if not p.exists():
+        return {}
+    try:
+        with open(p, encoding="utf-8") as fh:
+            raw = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    out = {}
+    for k, v in raw.items():
+        if isinstance(k, str) and isinstance(v, str):
+            k_s, v_s = k.strip(), v.strip()
+            if k_s and v_s:
+                out[k_s] = v_s
+    return out
+
+
+def _save_project_aliases(aliases, path=None):
+    """Atomically persist the alias mapping. Creates the parent dir if needed.
+
+    Entries with empty/whitespace-only display names are dropped — the spec
+    says empty display_name clears the alias.
+    """
+    p = Path(path) if path is not None else PROJECT_ALIASES_PATH
+    cleaned = {}
+    for k, v in (aliases or {}).items():
+        if not isinstance(k, str) or not isinstance(v, str):
+            continue
+        k_s, v_s = k.strip(), v.strip()
+        if k_s and v_s:
+            cleaned[k_s] = v_s
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(cleaned, fh, indent=2, sort_keys=True, ensure_ascii=False)
+        fh.write("\n")
+    os.replace(tmp, p)
+    return cleaned
+
 
 # ── Bundled themes ─────────────────────────────────────────────────────────────
 BUNDLED_THEMES = [
@@ -403,6 +455,7 @@ def get_dashboard_data(db_path=None):
             ORDER BY last_timestamp DESC
         """).fetchall()
 
+    aliases = _load_project_aliases()
     sessions_all = []
     for r in session_rows:
         try:
@@ -411,11 +464,13 @@ def get_dashboard_data(db_path=None):
             duration_min = round((t2 - t1).total_seconds() / 60, 1)
         except Exception:
             duration_min = 0
+        raw_project = r["project_name"] or "unknown"
         sessions_all.append({
             "session_id":      r["session_id"][:8],
             "session_id_full": r["session_id"],
             "session_name":    r["session_name"] or "",
-            "project":         r["project_name"] or "unknown",
+            "project":         raw_project,
+            "display_name":    aliases.get(raw_project, ""),
             "branch":          r["git_branch"] or "",
             "first":           (r["first_timestamp"] or "")[:16].replace("T", " "),
             "last":            (r["last_timestamp"] or "")[:16].replace("T", " "),
@@ -543,9 +598,12 @@ def get_session_detail(session_id, db_path=None):
     except Exception:
         duration_min = 0
 
+    raw_project = session["project_name"] or "unknown"
+    aliases = _load_project_aliases()
     return {
         "session_id":     session["session_id"],
-        "project":        session["project_name"] or "unknown",
+        "project":        raw_project,
+        "display_name":   aliases.get(raw_project, ""),
         "branch":         session["git_branch"] or "",
         "first":          (session["first_timestamp"] or "")[:19].replace("T", " "),
         "last":           (session["last_timestamp"] or "")[:19].replace("T", " "),
@@ -1038,6 +1096,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   tr:hover td { background: rgba(0,113,227,0.03); }
   .model-tag { display: inline-block; padding: 2px 8px; border-radius: 980px; font-size: 11px; background: rgba(0,113,227,0.08); color: var(--accent); letter-spacing: -0.08px; }
   .session-name { color: var(--text); font-weight: 600; }
+  .proj-edit-btn { background: transparent; border: 0; color: var(--muted); padding: 0 2px; margin-left: 2px; cursor: pointer; font-size: 11px; line-height: 1; opacity: 0; transition: opacity 0.1s; }
+  tr:hover .proj-edit-btn, td:hover .proj-edit-btn { opacity: 0.7; }
+  .proj-edit-btn:hover { color: var(--accent); opacity: 1; }
   .cost { color: var(--green); font-family: "SF Mono", ui-monospace, monospace; font-size: 12px; }
   .cost-na { color: var(--muted); font-family: "SF Mono", ui-monospace, monospace; font-size: 11px; }
   .num { font-family: "SF Mono", ui-monospace, monospace; font-size: 12px; }
@@ -1345,6 +1406,58 @@ function esc(s) {
   const d = document.createElement('div');
   d.textContent = String(s);
   return d.innerHTML;
+}
+
+// ── Project display-name overrides ────────────────────────────────────────
+// rawData.sessions_all carries both `project` (raw, used for filtering and
+// aggregation keys) and `display_name` (user-supplied pretty label). Every
+// table/chart that renders a project name should funnel through these.
+const _projDisplayCache = {};
+function rebuildProjectDisplayCache() {
+  for (const k in _projDisplayCache) delete _projDisplayCache[k];
+  if (!rawData || !rawData.sessions_all) return;
+  for (const s of rawData.sessions_all) {
+    if (s.display_name) _projDisplayCache[s.project] = s.display_name;
+  }
+}
+function projDisplay(rawProject) {
+  if (!rawProject) return '';
+  return _projDisplayCache[rawProject] || rawProject;
+}
+function projCellHTML(rawProject) {
+  // <project label> + tiny pencil button. Click → prompt for new name.
+  const display = projDisplay(rawProject);
+  const renamed = display !== rawProject;
+  const title = renamed
+    ? 'Rename project (raw: ' + rawProject + ')'
+    : 'Set a display name';
+  return esc(display)
+    + ' <button type="button" class="proj-edit-btn" title="' + esc(title)
+    + '" onclick="renameProject(event, ' + JSON.stringify(rawProject) + ')">&#9998;</button>';
+}
+async function renameProject(ev, rawProject) {
+  if (ev) { ev.stopPropagation(); ev.preventDefault(); }
+  const current = projDisplay(rawProject);
+  const suggested = current === rawProject ? '' : current;
+  const next = window.prompt(
+    'Display name for "' + rawProject + '"\n(blank to clear)',
+    suggested,
+  );
+  if (next === null) return;  // user hit Cancel
+  try {
+    const resp = await fetch('/api/project-name', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ raw: rawProject, display: next }),
+    });
+    if (!resp.ok) {
+      alert('Could not save project name (HTTP ' + resp.status + ').');
+      return;
+    }
+    await loadData();
+  } catch (e) {
+    alert('Could not save project name: ' + e);
+  }
 }
 
 // ── State ──────────────────────────────────────────────────────────────────
@@ -1867,7 +1980,7 @@ function renderSessionDetail(detail) {
   document.getElementById('session-detail').innerHTML = `
     <div class="detail-meta">
       <div><div class="label">Session</div><div class="value" style="font-family:monospace">${esc(detail.session_id)}</div></div>
-      <div><div class="label">Project</div><div class="value">${esc(detail.project)}</div></div>
+      <div><div class="label">Project</div><div class="value">${projCellHTML(detail.project)}</div></div>
       <div><div class="label">Branch</div><div class="value">${esc(detail.branch || 'n/a')}</div></div>
       <div><div class="label">Model</div><div class="value">${esc(detail.model)}</div></div>
       <div><div class="label">First Seen</div><div class="value">${esc(detail.first)}</div></div>
@@ -2126,7 +2239,7 @@ function renderPareto(filteredSessions) {  // eslint-disable-line no-unused-vars
   const top = ranked.reduce((a, s) => a + s.cost, 0);
   const pct = (top / total * 100).toFixed(0);
   el.style.display = "";
-  const names = ranked.map(s => `${s.project} (${s.session_id})`).join(", ");
+  const names = ranked.map(s => `${projDisplay(s.project)} (${s.session_id})`).join(", ");
   el.innerHTML = `<strong>Cost concentration:</strong> top 5 sessions account for <strong>${pct}%</strong> of spend in the current range. <span style="color:var(--muted)">(${names})</span>`;
 }
 
@@ -2278,7 +2391,7 @@ function renderProjectChart(byProject) {
   charts.project = new Chart(ctx, {
     type: 'bar',
     data: {
-      labels: top.map(p => p.project.length > 22 ? '\u2026' + p.project.slice(-20) : p.project),
+      labels: top.map(p => { const d = projDisplay(p.project); return d.length > 22 ? '\u2026' + d.slice(-20) : d; }),
       datasets: [
         { label: 'Input',  data: top.map(p => p.input),  backgroundColor: tokenColors().input },
         { label: 'Output', data: top.map(p => p.output), backgroundColor: tokenColors().output },
@@ -2307,7 +2420,7 @@ function renderSessionsTable(sessions) {
       : `<td class="muted" style="font-family:monospace"><a href="#" onclick="_openSession('${s.session_id}'); return false;" style="color:var(--accent); text-decoration:none;">${esc(s.session_id)}</a>&hellip;${tagLink}</td>`;
     return `<tr class="session-row ${selectedSessionId === s.session_id_full ? 'selected' : ''}" data-session-id="${esc(s.session_id_full)}">
       ${sessionCell}
-      <td>${esc(s.project)}</td>
+      <td>${projCellHTML(s.project)}</td>
       <td class="muted">${esc(s.last)}</td>
       <td class="muted">${esc(s.duration_min)}m</td>
       <td><span class="model-tag">${esc(s.model)}</span></td>
@@ -2405,7 +2518,7 @@ function sortProjects(byProject) {
 function renderProjectCostTable(byProject) {
   document.getElementById('project-cost-body').innerHTML = sortProjects(byProject).map(p => {
     return `<tr>
-      <td>${esc(p.project)}</td>
+      <td>${projCellHTML(p.project)}</td>
       <td class="num">${p.sessions}</td>
       <td class="num">${fmt(p.turns)}</td>
       <td class="num">${fmt(p.input)}</td>
@@ -2450,7 +2563,7 @@ function sortProjectBranch(rows) {
 function renderProjectBranchCostTable(rows) {
   document.getElementById('project-branch-cost-body').innerHTML = sortProjectBranch(rows).map(pb => {
     return `<tr>
-      <td>${esc(pb.project)}</td>
+      <td>${projCellHTML(pb.project)}</td>
       <td class="muted" style="font-family:monospace">${esc(pb.branch || '\u2014')}</td>
       <td class="num">${pb.sessions}</td>
       <td class="num">${fmt(pb.turns)}</td>
@@ -2490,26 +2603,26 @@ function downloadCSV(reportType, header, rows) {
 }
 
 function exportSessionsCSV() {
-  const header = ['Session ID', 'Session Name', 'Project', 'Last Active', 'Duration (min)', 'Model', 'Turns', 'Input', 'Output', 'Cache Read', 'Cache Creation', 'Est. Cost'];
+  const header = ['Session ID', 'Session Name', 'Project', 'Project Display', 'Last Active', 'Duration (min)', 'Model', 'Turns', 'Input', 'Output', 'Cache Read', 'Cache Creation', 'Est. Cost'];
   const rows = lastFilteredSessions.map(s => {
     const cost = calcCost(s.model, s.input, s.output, s.cache_read, s.cache_creation, s.cache_1h);
-    return [s.session_id, s.session_name || '', s.project, s.last, s.duration_min, s.model, s.turns, s.input, s.output, s.cache_read, s.cache_creation, cost.toFixed(4)];
+    return [s.session_id, s.session_name || '', s.project, projDisplay(s.project), s.last, s.duration_min, s.model, s.turns, s.input, s.output, s.cache_read, s.cache_creation, cost.toFixed(4)];
   });
   downloadCSV('sessions', header, rows);
 }
 
 function exportProjectsCSV() {
-  const header = ['Project', 'Sessions', 'Turns', 'Input', 'Output', 'Cache Read', 'Cache Creation', 'Est. Cost'];
+  const header = ['Project', 'Project Display', 'Sessions', 'Turns', 'Input', 'Output', 'Cache Read', 'Cache Creation', 'Est. Cost'];
   const rows = lastByProject.map(p => {
-    return [p.project, p.sessions, p.turns, p.input, p.output, p.cache_read, p.cache_creation, p.cost.toFixed(4)];
+    return [p.project, projDisplay(p.project), p.sessions, p.turns, p.input, p.output, p.cache_read, p.cache_creation, p.cost.toFixed(4)];
   });
   downloadCSV('projects', header, rows);
 }
 
 function exportProjectBranchCSV() {
-  const header = ['Project', 'Branch', 'Sessions', 'Turns', 'Input', 'Output', 'Cache Read', 'Cache Creation', 'Est. Cost'];
+  const header = ['Project', 'Project Display', 'Branch', 'Sessions', 'Turns', 'Input', 'Output', 'Cache Read', 'Cache Creation', 'Est. Cost'];
   const rows = lastByProjectBranch.map(pb => {
-    return [pb.project, pb.branch, pb.sessions, pb.turns, pb.input, pb.output, pb.cache_read, pb.cache_creation, pb.cost.toFixed(4)];
+    return [pb.project, projDisplay(pb.project), pb.branch, pb.sessions, pb.turns, pb.input, pb.output, pb.cache_read, pb.cache_creation, pb.cost.toFixed(4)];
   });
   downloadCSV('projects_by_branch', header, rows);
 }
@@ -2697,6 +2810,7 @@ async function loadData() {
 
     const isFirstLoad = rawData === null;
     rawData = d;
+    rebuildProjectDisplayCache();
 
     if (isFirstLoad) {
       // Restore range from URL, mark active button
@@ -2976,6 +3090,48 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 verbose=False,
             )
             body = json.dumps(result).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif path == "/api/project-name":
+            # Body: {"raw": "PhpstormProjects/PPC freelo", "display": "PPC.cz"}
+            # Empty/whitespace display clears the alias (per spec).
+            length = int(self.headers.get("Content-Length") or 0)
+            raw_body = self.rfile.read(length) if length else b""
+            try:
+                payload = json.loads(raw_body or b"{}")
+            except json.JSONDecodeError:
+                payload = None
+            if not isinstance(payload, dict) or not isinstance(payload.get("raw"), str):
+                err = json.dumps({"error": "Body must be {raw: str, display: str}"}).encode("utf-8")
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(err)))
+                self.end_headers()
+                self.wfile.write(err)
+                return
+            raw_name = payload["raw"].strip()
+            display = payload.get("display", "")
+            if not isinstance(display, str):
+                display = ""
+            display = display.strip()
+            if not raw_name:
+                err = json.dumps({"error": "raw must be a non-empty string"}).encode("utf-8")
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(err)))
+                self.end_headers()
+                self.wfile.write(err)
+                return
+            aliases = _load_project_aliases()
+            if display:
+                aliases[raw_name] = display
+            else:
+                aliases.pop(raw_name, None)
+            saved = _save_project_aliases(aliases)
+            body = json.dumps({"ok": True, "aliases": saved}).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
