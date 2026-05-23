@@ -540,6 +540,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   header .meta { color: var(--muted); font-size: 12px; letter-spacing: -0.12px; }
   .appearance-btn { background: transparent; border: 1px solid var(--border); border-radius: 6px; color: var(--muted); font-size: 12px; padding: 4px 12px; cursor: pointer; letter-spacing: -0.12px; transition: all 0.15s; white-space: nowrap; }
   .appearance-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .link-btn { background: transparent; border: none; color: var(--muted); cursor: pointer; font-size: 11px; padding: 4px 8px; }
+  .link-btn:hover { color: var(--text); text-decoration: underline; }
   #rescan-btn { background: var(--card); border: 1px solid var(--border); color: var(--muted); padding: 4px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; }
   #rescan-btn:hover { color: var(--text); border-color: var(--accent); }
   #rescan-btn:disabled { opacity: 0.5; cursor: not-allowed; }
@@ -626,7 +628,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <h1>Claude Code Usage Dashboard</h1>
   <div style="display:flex;align-items:center;gap:12px">
     <div class="meta" id="meta">Loading...</div>
-    <button id="rescan-btn" onclick="triggerRescan()" title="Rebuild the database from scratch by re-scanning all JSONL files. Use if data looks stale or costs seem wrong.">&#x21bb; Rescan</button>
+    <button class="link-btn" onclick="_resetPrefs()" title="Clear saved range / model / theme preferences and reload">Reset prefs</button>
+      <button id="rescan-btn" onclick="triggerRescan()" title="Rebuild the database from scratch by re-scanning all JSONL files. Use if data looks stale or costs seem wrong.">&#x21bb; Rescan</button>
     <button class="appearance-btn" onclick="window.open('/themes','_blank')">Appearance</button>
   </div>
 </header>
@@ -792,7 +795,24 @@ function esc(s) {
 // ── State ──────────────────────────────────────────────────────────────────
 let rawData = null;
 let selectedModels = new Set();
-let selectedRange = '30d';
+const LS_KEY = 'claude-usage-prefs/v1';
+function _loadPrefs() {
+  try { return JSON.parse(localStorage.getItem(LS_KEY) || '{}') || {}; }
+  catch (e) { return {}; }
+}
+function _savePrefs(patch) {
+  try {
+    const cur = _loadPrefs();
+    const next = Object.assign({}, cur, patch);
+    localStorage.setItem(LS_KEY, JSON.stringify(next));
+  } catch (e) { /* private mode / quota / SSR */ }
+}
+function _resetPrefs() {
+  try { localStorage.removeItem(LS_KEY); } catch (e) {}
+  window.location.search = '';  // clears URL params + reloads
+}
+
+let selectedRange = (_loadPrefs().range) || '30d';
 let charts = {};
 let sessionSortCol = 'last';
 let modelSortCol = 'cost';
@@ -805,7 +825,7 @@ let lastFilteredSessions = [];
 let lastByProject = [];
 let lastByProjectBranch = [];
 let sessionSortDir = 'desc';
-let hourlyTZ = 'local';  // 'local' or 'utc'
+let hourlyTZ = (_loadPrefs().hourlyTZ) || 'local';  // 'local' or 'utc'
 
 // ── Peak-hour config ───────────────────────────────────────────────────────
 // Anthropic throttles Mon–Fri 05:00–11:00 PT. We approximate as fixed UTC hours
@@ -952,6 +972,7 @@ function readURLRange() {
 }
 
 function setRange(range) {
+  _savePrefs({ range: r });
   selectedRange = range;
   document.querySelectorAll('.range-btn').forEach(btn =>
     btn.classList.toggle('active', btn.dataset.range === range)
@@ -962,6 +983,7 @@ function setRange(range) {
 }
 
 function setHourlyTZ(mode) {
+  _savePrefs({ hourlyTZ: tz });
   hourlyTZ = mode;
   document.querySelectorAll('.tz-btn').forEach(btn =>
     btn.classList.toggle('active', btn.dataset.tz === mode)
@@ -1011,6 +1033,7 @@ function buildFilterUI(allModels) {
 }
 
 function onModelToggle(cb) {
+  _savePrefs({ models: Array.from(selectedModels) });
   const label = cb.closest('label');
   if (cb.checked) { selectedModels.add(cb.value);    label.classList.add('checked'); }
   else            { selectedModels.delete(cb.value); label.classList.remove('checked'); }
@@ -1019,6 +1042,7 @@ function onModelToggle(cb) {
 }
 
 function selectAllModels() {
+  _savePrefs({ models: Array.from(selectedModels) });
   document.querySelectorAll('#model-checkboxes input').forEach(cb => {
     cb.checked = true; selectedModels.add(cb.value); cb.closest('label').classList.add('checked');
   });
@@ -1604,7 +1628,20 @@ async function triggerRescan() {
     const resp = await fetch('/api/rescan', { method: 'POST' });
     const d = await resp.json();
     btn.textContent = '\u21bb Rescan (' + d.new + ' new, ' + d.updated + ' updated)';
-    await loadData();
+    await 
+
+// Apply localStorage prefs at startup if URL didn't carry any.
+(function bootstrapPrefs() {
+  try {
+    if (window.location.search) return;  // URL takes precedence
+    const p = _loadPrefs();
+    if (Array.isArray(p.models) && p.models.length) {
+      selectedModels = new Set(p.models);
+    }
+  } catch (e) {}
+})();
+
+loadData();
   } catch(e) {
     btn.textContent = '\u21bb Rescan (error)';
     console.error(e);
