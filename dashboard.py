@@ -986,20 +986,6 @@ def _cost_per_turn_stats(conn):
         FROM turns
     """).fetchall()
     costs = []
-def _subagent_split(conn):
-    """Return {main: cost, subagent: cost, main_pct} from current PRICING.
-    Uses the convention that turns with tool_name='subagent' are delegated
-    (Cowork Task-spawn); everything else is main-thread."""
-    from pricing import get_pricing
-    rows = conn.execute("""
-        SELECT tool_name, model,
-               SUM(input_tokens) as inp, SUM(output_tokens) as out,
-               SUM(cache_read_tokens) as cr, SUM(cache_creation_tokens) as cw
-        FROM turns
-        GROUP BY tool_name, model
-    """).fetchall()
-    main = 0.0
-    sub = 0.0
     for r in rows:
         p = get_pricing(r["model"])
         if not p:
@@ -1538,7 +1524,7 @@ def get_dashboard_data(db_path=DB_PATH):
     } for r in hourly_rows]
 
     # ── All sessions (client filters by range, model, and account) ────────────
-    # session_name / account may be missing on older DB schemas; fall back gracefully.
+    # session_name / account / machine_id may be missing on older DB schemas; fall back gracefully.
     try:
         session_rows = conn.execute("""
             SELECT
@@ -1546,31 +1532,21 @@ def get_dashboard_data(db_path=DB_PATH):
                 total_input_tokens, total_output_tokens,
                 total_cache_read, total_cache_creation, model, turn_count,
                 git_branch, session_name,
-                COALESCE(NULLIF(account, ''), 'default') AS account
-                git_branch, session_name, machine_id
+                COALESCE(NULLIF(account, ''), 'default') AS account,
+                machine_id
             FROM sessions
             ORDER BY last_timestamp DESC
         """).fetchall()
     except sqlite3.OperationalError:
-        # Pre-migration DB: synthesise session_name=None and account='default'
-        session_rows = conn.execute("""
-            SELECT
-                session_id, project_name, first_timestamp, last_timestamp,
-                total_input_tokens, total_output_tokens,
-                total_cache_read, total_cache_creation, model, turn_count,
-                git_branch, NULL AS session_name,
-                'default' AS account
-            FROM sessions
-            ORDER BY last_timestamp DESC
-        """).fetchall()
-        # Pre-migration DB: synthesise session_name=None
         try:
             session_rows = conn.execute("""
                 SELECT
                     session_id, project_name, first_timestamp, last_timestamp,
                     total_input_tokens, total_output_tokens,
                     total_cache_read, total_cache_creation, model, turn_count,
-                    git_branch, session_name, NULL AS machine_id
+                    git_branch, session_name,
+                    'default' AS account,
+                    NULL AS machine_id
                 FROM sessions
                 ORDER BY last_timestamp DESC
             """).fetchall()
@@ -1580,7 +1556,9 @@ def get_dashboard_data(db_path=DB_PATH):
                     session_id, project_name, first_timestamp, last_timestamp,
                     total_input_tokens, total_output_tokens,
                     total_cache_read, total_cache_creation, model, turn_count,
-                    git_branch, NULL AS session_name, NULL AS machine_id
+                    git_branch, NULL AS session_name,
+                    'default' AS account,
+                    NULL AS machine_id
                 FROM sessions
                 ORDER BY last_timestamp DESC
             """).fetchall()
@@ -3367,19 +3345,13 @@ function computePeriod(range) {
     m.turns          += r.turns;
   }
 
-  // Filter sessions by model + date range
-  const filteredSessions = rawData.sessions_all.filter(s => _matchesSearch(s) &&
-  const filteredSessions = rawData.sessions_all.filter(s =>
-    selectedModels.has(s.model) && (!start || s.last_date >= start) && (!end || s.last_date <= end)
-  // Filter sessions by model + date range + account
+  // Filter sessions by model + date range + account + machine + search
   const inAccount = (s) => selectedAccount === 'all' || (s.account || 'default') === selectedAccount;
-  const filteredSessions = rawData.sessions_all.filter(s =>
-    selectedModels.has(s.model) && (!start || s.last_date >= start) && (!end || s.last_date <= end) && inAccount(s)
-  // Filter sessions by model + date range + machine
-  const filteredSessions = rawData.sessions_all.filter(s =>
+  const filteredSessions = rawData.sessions_all.filter(s => _matchesSearch(s) &&
     selectedModels.has(s.model)
     && (!start || s.last_date >= start)
     && (!end || s.last_date <= end)
+    && inAccount(s)
     && (!selectedMachine || s.machine_id === selectedMachine)
   );
   for (const s of filteredSessions) {
@@ -5566,6 +5538,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             body = json.dumps(manifest).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/manifest+json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         elif path.startswith("/api/text/"):
             # Single-number text endpoints for osascript / SwiftBar / cron + curl.
             # Always return a bare ASCII string with no trailing newline so
@@ -5760,6 +5736,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 aliases.pop(raw_name, None)
             saved = _save_project_aliases(aliases)
             body = json.dumps({"ok": True, "aliases": saved}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         elif path.startswith("/api/inbound/"):
             # Inbound webhook receiver: any caller can POST arbitrary JSON
             # to /api/inbound/<event_type>. We wrap it with envelope

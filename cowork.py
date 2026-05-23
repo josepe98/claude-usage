@@ -143,8 +143,6 @@ def parse_audit_file(filepath):
                         "cache_read_tokens": int(usage.get("cacheReadInputTokens", 0) or 0),
                         "cache_creation_tokens": cache_5m,
                         "cache_1h_tokens": cache_1h,
-                        "tool_name": None,
-                        "cache_creation_tokens": int(usage.get("cacheCreationInputTokens", 0) or 0),
                         "tool_name": "subagent" if is_subagent else None,
                         "cwd": project_name,
                         "message_id": f"cowork-{session_id}-{msg_idx}-{model}",

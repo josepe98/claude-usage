@@ -409,9 +409,8 @@ def upsert_sessions(conn, sessions):
                     (session_id, project_name, first_timestamp, last_timestamp,
                      git_branch, total_input_tokens, total_output_tokens,
                      total_cache_read, total_cache_creation, total_cache_1h, model, turn_count,
-                     session_name, account)
-                     session_name, machine_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     session_name, account, machine_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 s["session_id"], s["project_name"], s["first_timestamp"],
                 s["last_timestamp"], s["git_branch"],
