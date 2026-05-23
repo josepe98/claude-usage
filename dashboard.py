@@ -696,7 +696,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     </table>
   </div>
   <div class="table-card">
-    <div class="section-header"><div class="section-title">Recent Sessions</div><button class="export-btn" onclick="exportSessionsCSV()" title="Export all filtered sessions to CSV">&#x2913; CSV</button></div>
+    <div class="section-header"><div class="section-title">Recent Sessions</div>
+      <input id="sessions-search" type="search" placeholder="Search project / branch / session…" oninput="_onSearchInput(this.value)" style="width:100%; max-width:320px; padding:6px 10px; margin: 4px 0 12px; background: var(--card); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 12px;"><button class="export-btn" onclick="exportSessionsCSV()" title="Export all filtered sessions to CSV">&#x2913; CSV</button></div>
     <table>
       <thead><tr>
         <th>Session</th>
@@ -1115,7 +1116,7 @@ function applyFilter() {
   }
 
   // Filter sessions by model + date range
-  const filteredSessions = rawData.sessions_all.filter(s =>
+  const filteredSessions = rawData.sessions_all.filter(s => _matchesSearch(s) &&
     selectedModels.has(s.model) && (!start || s.last_date >= start) && (!end || s.last_date <= end)
   );
 
@@ -1354,6 +1355,18 @@ function renderModelChart(byModel) {
       }
     }
   });
+}
+
+let _searchTerm = "";
+function _onSearchInput(v) {  // eslint-disable-line no-unused-vars
+  _searchTerm = (v || "").toLowerCase();
+  applyFilter();  // re-render with the new filter
+}
+
+function _matchesSearch(s) {
+  if (!_searchTerm) return true;
+  const fields = [s.project, s.branch, s.session_id, s.session_name, s.model].filter(Boolean);
+  return fields.some(f => String(f).toLowerCase().includes(_searchTerm));
 }
 
 function renderProjectChart(byProject) {
