@@ -30,8 +30,8 @@ Captures usage from:
 - **VS Code extension** (Claude Code sidebar)
 - **Dispatched Code sessions** (sessions routed through Claude Code)
 
-**Not captured:**
-- **Cowork sessions** — these run server-side and do not write local JSONL transcripts
+**Also captured:**
+- **Claude Desktop Cowork sessions** — via local audit logs (see [Cowork sessions](#cowork-sessions) below)
 
 ---
 
