@@ -151,10 +151,28 @@ Token totals come from the authoritative `result.modelUsage` blocks (the same
 numbers Anthropic uses for billing), so cost estimates line up with what
 the API reports rather than aggregating per-event streaming chunks.
 
+## Shell tab completion
+
+Generate a completion script for your shell and source it. Subcommand names
+(`scan`, `today`, `dashboard`, …) and long flags (`--projects-dir`, `--host`,
+`--port`, …) will then tab-complete.
+
+```
+# bash
+python3 cli.py completions bash > ~/.claude-usage-completion.bash
+echo 'source ~/.claude-usage-completion.bash' >> ~/.bashrc
+
+# zsh — drop into any directory on $fpath
+python3 cli.py completions zsh > ~/.zsh/completions/_claude-usage
+
+# fish
+python3 cli.py completions fish > ~/.config/fish/completions/claude-usage.fish
+```
+
 ## Files
 
 | File | Purpose |
 |------|---------|
 | `scanner.py` | Parses JSONL transcripts, writes to `~/.claude/usage.db` |
 | `dashboard.py` | HTTP server + single-page HTML/JS dashboard |
-| `cli.py` | `scan`, `today`, `stats`, `dashboard`, `theme` commands |
+| `cli.py` | `scan`, `today`, `stats`, `dashboard`, `theme`, `completions` commands |
