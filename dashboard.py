@@ -1242,7 +1242,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <div id="live-widget" style="display:none; padding:6px 10px; margin-right:10px; background:rgba(34,197,94,0.12); color:#22c55e; border-radius:6px; font-size:11px; font-weight:600; cursor:default;" title=""></div>
     <button id="reset-btn" onclick="_confirmReset()" title="Delete usage.db entirely and re-create empty schema. Run scan afterwards to repopulate." style="background: var(--card); border: 1px solid var(--border); color: var(--muted); padding: 4px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; margin-left: 6px;">&#x1f5d1; Reset DB</button>
     <button id="rescan-btn" onclick="triggerRescan()" title="Rebuild the database from scratch by re-scanning all JSONL files. Use if data looks stale or costs seem wrong.">&#x21bb; Rescan</button>
-    <button class="appearance-btn" onclick="window.open('/themes','_blank')">Appearance</button>
+    <select id="theme-quick" onchange="_onThemeQuickChange(this.value)" title="Quick-switch theme" style="background: var(--card); border: 1px solid var(--border); border-radius: 6px; color: var(--text); padding: 4px 8px; font-size: 12px; margin-right: 6px;"></select>
+      <button class="appearance-btn" onclick="window.open('/themes','_blank')">Appearance</button>
   </div>
 </header>
 
@@ -1438,6 +1439,28 @@ function setTheme(css, id) {
   const css = localStorage.getItem('dashboard-theme-css');
   if (css) document.getElementById('active-theme').textContent = css;
 })();
+
+async function _populateThemeDropdown() {  // eslint-disable-line no-unused-vars
+  try {
+    const sel = document.getElementById("theme-quick");
+    if (!sel) return;
+    const r = await fetch("/api/themes");
+    const themes = await r.json();
+    const current = localStorage.getItem("dashboard-theme-id") || "apple";
+    sel.innerHTML = themes.map(t =>
+      \`<option value="\${t.id}" \${t.id === current ? "selected" : ""}>\${t.name}</option>\`
+    ).join("");
+    // Cache themes for instant switching without another fetch
+    window._cachedThemes = themes;
+  } catch (e) { /* gallery / themes API not present — fine */ }
+}
+
+function _onThemeQuickChange(id) {  // eslint-disable-line no-unused-vars
+  const themes = window._cachedThemes || [];
+  const t = themes.find(x => x.id === id);
+  if (!t) return;
+  setTheme(t.css, t.id);
+}
 
 function chartColors() {
   const s = getComputedStyle(document.documentElement);
@@ -2920,6 +2943,7 @@ document.addEventListener('keydown', (e) => {
 });
 
 loadData();
+    await loadData(); _populateThemeDropdown();
   } catch(e) {
     btn.textContent = '\u21bb Rescan (error)';
     console.error(e);
