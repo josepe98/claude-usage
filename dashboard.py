@@ -166,6 +166,52 @@ def get_themes():
     return list(themes.values())
 
 
+
+def _anomaly_check(conn, threshold_sigma=2.0):
+    """Detect spend spikes. Returns dict with today/avg/sigma/is_anomalous."""
+    from pricing import get_pricing
+    from datetime import date as _date, timedelta as _td
+    today = _date.today().strftime("%Y-%m-%d")
+    cutoff = (_date.today() - _td(days=30)).strftime("%Y-%m-%d")
+    rows = conn.execute("""
+        SELECT date(timestamp) as day, model,
+               SUM(input_tokens) as inp, SUM(output_tokens) as out,
+               SUM(cache_read_tokens) as cr, SUM(cache_creation_tokens) as cw
+        FROM turns
+        WHERE timestamp IS NOT NULL AND date(timestamp) >= ?
+        GROUP BY day, model
+    """, (cutoff,)).fetchall()
+    by_day = {}
+    for r in rows:
+        p = get_pricing(r["model"])
+        if not p:
+            continue
+        c = ((r["inp"] or 0) * p["input"]
+             + (r["out"] or 0) * p["output"]
+             + (r["cr"] or 0) * p["cache_read"]
+             + (r["cw"] or 0) * p["cache_write"]) / 1_000_000
+        by_day[r["day"]] = by_day.get(r["day"], 0.0) + c
+    if not by_day:
+        return {"is_anomalous": False, "reason": "no data"}
+    today_spend = by_day.get(today, 0.0)
+    history = [v for d, v in by_day.items() if d != today]
+    if len(history) < 7:
+        return {"is_anomalous": False, "reason": "not enough history",
+                "today": round(today_spend, 2)}
+    mean = sum(history) / len(history)
+    var = sum((v - mean) ** 2 for v in history) / len(history)
+    sigma = var ** 0.5
+    is_anomalous = today_spend > mean + threshold_sigma * sigma and today_spend > 2 * mean
+    return {
+        "is_anomalous": is_anomalous,
+        "today": round(today_spend, 2),
+        "mean": round(mean, 2),
+        "sigma": round(sigma, 2),
+        "ratio": round(today_spend / mean, 2) if mean > 0 else None,
+        "threshold_sigma": threshold_sigma,
+    }
+
+
 def get_dashboard_data(db_path=DB_PATH):
     if not db_path.exists():
         return {"error": "Database not found. Run: python cli.py scan"}
@@ -278,6 +324,7 @@ def get_dashboard_data(db_path=DB_PATH):
             "cache_creation": r["total_cache_creation"] or 0,
         })
 
+    anomaly = _anomaly_check(conn)
     conn.close()
 
     return {
@@ -285,6 +332,7 @@ def get_dashboard_data(db_path=DB_PATH):
         "daily_by_model":  daily_by_model,
         "hourly_by_model": hourly_by_model,
         "sessions_all":    sessions_all,
+        "anomaly":         anomaly,
         "generated_at":    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
@@ -651,7 +699,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 </div>
 
 <div class="container">
-  <div class="stats-row" id="stats-row"></div>
+  <div id="anomaly-banner" style="display:none; padding:10px 14px; margin: 0 0 12px 0; background:rgba(248,113,113,0.12); border-left:3px solid #f87171; border-radius:6px; color:#f87171; font-size:13px;"></div>
+    <div class="stats-row" id="stats-row"></div>
   <div class="charts-grid">
     <div class="chart-card wide">
       <h2 id="daily-chart-title">Daily Token Usage</h2>
@@ -1183,6 +1232,7 @@ function applyFilter() {
   renderHourlyChart(hourlyAgg);
   renderModelChart(byModel);
   renderProjectChart(byProject);
+  renderAnomalyBanner();
   lastFilteredSessions = sortSessions(filteredSessions);
   lastByProject = sortProjects(byProject);
   lastByProjectBranch = sortProjectBranch(byProjectBranch);
@@ -1354,6 +1404,17 @@ function renderModelChart(byModel) {
       }
     }
   });
+}
+
+function renderAnomalyBanner() {  // eslint-disable-line no-unused-vars
+  const a = rawData && rawData.anomaly;
+  const el = document.getElementById("anomaly-banner");
+  if (!el || !a || !a.is_anomalous) {
+    if (el) el.style.display = "none";
+    return;
+  }
+  el.style.display = "";
+  el.innerHTML = \`⚠ <strong>Spend spike detected.</strong> Today's spend ($\${a.today.toFixed(2)}) is \${a.ratio}x the 30-day average ($\${a.mean.toFixed(2)}). Did an agent loop go haywire?\`;
 }
 
 function renderProjectChart(byProject) {
