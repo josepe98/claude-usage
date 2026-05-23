@@ -606,6 +606,8 @@ GALLERY_TEMPLATE = r"""<!DOCTYPE html>
 </style>
 </head>
 <body>
+
+
 <div class="g-header">
   <button class="g-back" onclick="window.close()">← Back</button>
   <div class="g-title">Appearance</div>
@@ -985,6 +987,15 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 </style>
 </head>
 <body>
+<div id="session-modal" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.65); z-index:1000; align-items:center; justify-content:center;" onclick="if(event.target===this) _closeSessionModal()">
+  <div style="background:var(--card); border-radius:12px; padding:24px; max-width:900px; width:90%; max-height:80vh; overflow-y:auto; color:var(--text);">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+      <h2 id="session-modal-title" style="margin:0;">Session</h2>
+      <button onclick="_closeSessionModal()" style="background:none; border:none; color:var(--muted); font-size:24px; cursor:pointer;">&times;</button>
+    </div>
+    <div id="session-modal-body"></div>
+  </div>
+</div>
 <header>
   <h1>Claude Code Usage Dashboard</h1>
   <div style="display:flex;align-items:center;gap:12px">
@@ -2078,6 +2089,70 @@ function renderDowHourHeatmap() {  // eslint-disable-line no-unused-vars
   el.innerHTML = cells.join("");
 }
 
+function _openSession(sid) {  // eslint-disable-line no-unused-vars
+  fetch("/api/session?session_id=" + encodeURIComponent(sid))
+    .then(r => r.json())
+    .then(d => _renderSessionModal(sid, d))
+    .catch(e => alert("Could not load session: " + e));
+}
+
+function _renderSessionModal(sid, d) {  // eslint-disable-line no-unused-vars
+  const modal = document.getElementById("session-modal");
+  const body = document.getElementById("session-modal-body");
+  const title = document.getElementById("session-modal-title");
+  if (!modal || !body) return;
+  if (d.error) {
+    body.innerHTML = `<p style="color:#f87171;">${esc(d.error)}</p>`;
+  } else {
+    const s = d.session || {};
+    title.textContent = "Session " + sid + (s.project_name ? " — " + s.project_name : "");
+    const tools = (d.tools_breakdown || []).map(t =>
+      `<li>${esc(t.tool)} <span style="color:var(--muted);">(${t.count})</span></li>`
+    ).join("");
+    const lastFew = (d.timeline || []).slice(-30);
+    const rows = lastFew.map(t => `
+      <tr>
+        <td style="font-family:monospace;font-size:11px;">${(t.timestamp || "").slice(11,19)}</td>
+        <td>${esc(t.model || "")}</td>
+        <td style="text-align:right;">${(t.tokens || 0).toLocaleString()}</td>
+        <td style="text-align:right;">$${(t.cost || 0).toFixed(4)}</td>
+        <td style="text-align:right; color:var(--muted);">$${(t.cum_cost || 0).toFixed(2)}</td>
+        <td style="color:var(--muted);">${esc(t.tool || "")}</td>
+      </tr>
+    `).join("");
+    body.innerHTML = `
+      <div style="display:flex; gap: 24px; font-size:12px; color:var(--muted); margin-bottom:16px;">
+        <div>Project: <strong style="color:var(--text);">${esc(s.project_name || "?")}</strong></div>
+        <div>Branch: <strong style="color:var(--text);">${esc(s.git_branch || "—")}</strong></div>
+        <div>Model: <strong style="color:var(--text);">${esc(s.model || "?")}</strong></div>
+        <div>Turns: <strong style="color:var(--text);">${d.turn_count_actual}</strong></div>
+        <div>Total cost: <strong style="color:#4ade80;">$${(d.total_cost || 0).toFixed(4)}</strong></div>
+      </div>
+      <h3 style="margin: 12px 0 4px;">Tools used</h3>
+      <ul style="margin: 0 0 16px 0; padding-left: 20px;">${tools || "<li style='color:var(--muted)'>none</li>"}</ul>
+      <h3 style="margin: 16px 0 4px;">Last ${lastFew.length} turns</h3>
+      <table style="width:100%; font-size:11px; border-collapse:collapse;">
+        <thead><tr style="color:var(--muted); text-align:left;">
+          <th>Time</th><th>Model</th><th style="text-align:right;">Tokens</th>
+          <th style="text-align:right;">Cost</th><th style="text-align:right;">Cum</th><th>Tool</th>
+        </tr></thead>
+        <tbody>${rows || "<tr><td colspan='6' style='color:var(--muted);'>No turns</td></tr>"}</tbody>
+      </table>
+    `;
+  }
+  modal.style.display = "flex";
+}
+
+function _closeSessionModal() {  // eslint-disable-line no-unused-vars
+  const m = document.getElementById("session-modal");
+  if (m) m.style.display = "none";
+}
+
+// Esc closes the modal
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape") _closeSessionModal();
+});
+
 function renderProjectChart(byProject) {
   const top = byProject.slice(0, 10);
   const ctx = document.getElementById('chart-project').getContext('2d');
@@ -2111,8 +2186,8 @@ function renderSessionsTable(sessions) {
       : `<td class="cost-na">n/a</td>`;
     const tagLink = ` <a href="#" onclick="event.stopPropagation(); _promptTags('${esc(s.session_id)}'); return false;" style="font-size:10px;color:var(--muted);text-decoration:none;">tag</a>${_renderTags(s)}`;
     const sessionCell = s.session_name
-      ? `<td><span class="session-name">${esc(s.session_name)}</span> <span class="muted" style="font-family:monospace">(${esc(s.session_id)}&hellip;)</span>${tagLink}</td>`
-      : `<td class="muted" style="font-family:monospace">${esc(s.session_id)}&hellip;${tagLink}</td>`;
+      ? `<td><span class="session-name">${esc(s.session_name)}</span> <span class="muted" style="font-family:monospace">(<a href="#" onclick="_openSession('${s.session_id}'); return false;" style="color:var(--accent); text-decoration:none;">${esc(s.session_id)}</a>&hellip;)</span>${tagLink}</td>`
+      : `<td class="muted" style="font-family:monospace"><a href="#" onclick="_openSession('${s.session_id}'); return false;" style="color:var(--accent); text-decoration:none;">${esc(s.session_id)}</a>&hellip;${tagLink}</td>`;
     return `<tr class="session-row ${selectedSessionId === s.session_id_full ? 'selected' : ''}" data-session-id="${esc(s.session_id_full)}">
       ${sessionCell}
       <td>${esc(s.project)}</td>
