@@ -64,7 +64,7 @@ python3 cli.py dashboard
 
 ## Usage
 
-> On macOS/Linux, use `python3` instead of `python` in all commands below.
+> **macOS/Linux:** use `python3`. **Windows:** use `python`. If neither works, see [Requirements](#requirements).
 
 ```
 # Scan JSONL files and populate the database (~/.claude/usage.db)

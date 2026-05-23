@@ -34,7 +34,7 @@ def hr(char="-", width=60):
 
 def require_db():
     if not DB_PATH.exists():
-        print("Database not found. Run: python cli.py scan")
+        print("Database not found. Run: python3 cli.py scan")
         sys.exit(1)
     return sqlite3.connect(DB_PATH)
 
@@ -372,20 +372,26 @@ def cmd_theme():
     elif sub == "add":
         theme_id = sys.argv[3] if len(sys.argv) > 3 else None
         if not theme_id:
-            print("Usage: python cli.py theme add <id>")
-            print("Run 'python cli.py theme list' to see available theme IDs.")
+            print("Usage: python3 cli.py theme add <id>")
+            print("Run 'python3 cli.py theme list' to see available theme IDs.")
             sys.exit(1)
 
         # Check it's in the catalog
         catalog_entry = next((c for c in AWESOME_CATALOG if c["id"] == theme_id), None)
         if not catalog_entry:
-            print(f"Unknown theme '{theme_id}'. Run 'python cli.py theme list' to see valid IDs.")
+            print(f"Unknown theme '{theme_id}'. Run 'python3 cli.py theme list' to see valid IDs.")
             sys.exit(1)
 
         api_key = os.environ.get("ANTHROPIC_API_KEY")
         if not api_key:
-            print("ANTHROPIC_API_KEY environment variable is required to generate themes.")
-            print("Export it and re-run: export ANTHROPIC_API_KEY=sk-ant-...")
+            print("'theme add' generates a new theme using the Claude API and requires an API key.")
+            print("This is separate from your Claude Code subscription — you need an Anthropic API key.")
+            print("Get one at https://console.anthropic.com, then:")
+            print("  export ANTHROPIC_API_KEY=sk-ant-...")
+            print("  python3 cli.py theme add <id>")
+            print()
+            print("The built-in themes (apple, linear, vercel, notion, stripe) work without an API key:")
+            print("  python3 cli.py theme list")
             sys.exit(1)
 
         # Fetch the DESIGN.md from awesome-design-md
@@ -483,7 +489,7 @@ DESIGN.md:
     elif sub == "remove":
         theme_id = sys.argv[3] if len(sys.argv) > 3 else None
         if not theme_id:
-            print("Usage: python cli.py theme remove <id>")
+            print("Usage: python3 cli.py theme remove <id>")
             sys.exit(1)
         f = THEMES_DIR / f"{theme_id}.json"
         if f.exists():
@@ -496,13 +502,13 @@ DESIGN.md:
         print("""
 Theme management:
 
-  python cli.py theme list               List all installed and available themes
-  python cli.py theme add <id>           Generate and install a theme (requires ANTHROPIC_API_KEY)
-  python cli.py theme remove <id>        Remove a user-installed theme
+  python3 cli.py theme list               List all installed and available themes
+  python3 cli.py theme add <id>           Generate and install a theme (requires ANTHROPIC_API_KEY)
+  python3 cli.py theme remove <id>        Remove a user-installed theme
 
 Example:
-  python cli.py theme add spotify
-  python cli.py theme add tesla
+  python3 cli.py theme add spotify
+  python3 cli.py theme add tesla
 """)
 
 
@@ -512,13 +518,13 @@ USAGE = """
 Claude Code Usage Dashboard
 
 Usage:
-  python cli.py scan [--projects-dir PATH]       Scan JSONL files and update database
-  python cli.py today                            Show today's usage summary
-  python cli.py week                             Show last 7 days (per-day + by-model)
-  python cli.py stats                            Show all-time statistics
-  python cli.py dashboard [--projects-dir PATH] [--host HOST] [--port PORT]
+  python3 cli.py scan [--projects-dir PATH]       Scan JSONL files and update database
+  python3 cli.py today                            Show today's usage summary
+  python3 cli.py week                             Show last 7 days (per-day + by-model)
+  python3 cli.py stats                            Show all-time statistics
+  python3 cli.py dashboard [--projects-dir PATH] [--host HOST] [--port PORT]
                                                  Scan + start dashboard
-  python cli.py theme <list|add|remove>          Manage UI themes
+  python3 cli.py theme <list|add|remove>          Manage UI themes
 """
 
 COMMANDS = {
