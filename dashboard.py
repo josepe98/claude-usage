@@ -571,6 +571,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .stat-card .label { color: var(--muted); font-size: 12px; letter-spacing: -0.12px; margin-bottom: 8px; font-weight: 500; }
   .stat-card .value { font-size: 24px; font-weight: 600; letter-spacing: -0.28px; color: var(--text); }
   .stat-card .sub { color: var(--muted); font-size: 11px; margin-top: 4px; letter-spacing: -0.08px; }
+  .delta { display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 10px; font-size: 10px; font-weight: 600; vertical-align: middle; }
+  .delta-up   { background: rgba(248, 113, 113, 0.15); color: #f87171; }
+  .delta-down { background: rgba(74, 222, 128, 0.15);  color: #4ade80; }
 
   .charts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px; }
   .chart-card { background: var(--card); border-radius: var(--card-radius); border: var(--card-border); padding: 20px; box-shadow: var(--shadow); }
@@ -1090,6 +1093,35 @@ function applyFilter() {
     selectedModels.has(r.model) && (!start || r.day >= start) && (!end || r.day <= end)
   );
 
+  // Previous-period totals (same-length window ending the day before `start`)
+  // so each stat card can show a delta vs. the equivalent prior window.
+  let prevTotals = null;
+  if (start && end) {
+    const [prevStart, prevEnd] = _prevWindow(start, end);
+    const prevDaily = rawData.daily_by_model.filter(r =>
+      selectedModels.has(r.model) && r.day >= prevStart && r.day <= prevEnd
+    );
+    prevTotals = { input: 0, output: 0, cache_read: 0, cache_creation: 0, turns: 0, cost: 0 };
+    const prevSessIds = new Set();
+    for (const r of prevDaily) {
+      prevTotals.input  += r.input;
+      prevTotals.output += r.output;
+      prevTotals.cache_read     += r.cache_read;
+      prevTotals.cache_creation += r.cache_creation;
+      prevTotals.turns  += r.turns;
+    }
+    // Sessions: count sessions whose last_date is in the previous window
+    for (const s of rawData.sessions_all) {
+      if (!selectedModels.has(s.model)) continue;
+      if (s.last_date >= prevStart && s.last_date <= prevEnd) prevSessIds.add(s.session_id);
+    }
+    prevTotals.sessions = prevSessIds.size;
+    prevTotals.cost = prevDaily.reduce(
+      (acc, r) => acc + calcCost(r.model, r.input, r.output, r.cache_read, r.cache_creation),
+      0,
+    );
+  }
+
   // Daily chart: aggregate by day
   const dailyMap = {};
   for (const r of filteredDaily) {
@@ -1178,7 +1210,7 @@ function applyFilter() {
   document.getElementById('daily-chart-title').textContent = 'Daily Token Usage \u2014 ' + RANGE_LABELS[selectedRange];
   document.getElementById('hourly-chart-title').textContent = 'Average Hourly Distribution \u2014 ' + RANGE_LABELS[selectedRange];
 
-  renderStats(totals);
+  renderStats(totals, prevTotals);
   renderDailyChart(daily);
   renderHourlyChart(hourlyAgg);
   renderModelChart(byModel);
@@ -1193,20 +1225,42 @@ function applyFilter() {
 }
 
 // ── Renderers ──────────────────────────────────────────────────────────────
-function renderStats(t) {
+function _prevWindow(start, end) {
+  // Return [prevStart, prevEnd] — a same-length window ending the day before
+  // `start` (inclusive). Dates are YYYY-MM-DD strings, manipulated via Date.
+  const sd = new Date(start + 'T00:00:00Z');
+  const ed = new Date(end + 'T00:00:00Z');
+  const lenMs = ed - sd;
+  const prevEnd = new Date(sd.getTime() - 24 * 3600 * 1000);
+  const prevStart = new Date(prevEnd.getTime() - lenMs);
+  const fmt = d => d.toISOString().slice(0, 10);
+  return [fmt(prevStart), fmt(prevEnd)];
+}
+
+function _deltaBadge(curr, prev) {
+  if (prev == null || prev === undefined) return '';
+  if (prev === 0) return curr > 0 ? ' <span class="delta delta-up">new</span>' : '';
+  const pct = ((curr - prev) / prev) * 100;
+  if (Math.abs(pct) < 1) return '';  // ignore noise
+  const sign = pct > 0 ? '+' : '';
+  const cls = pct > 0 ? 'delta-up' : 'delta-down';
+  return ` <span class="delta ${cls}">${sign}${pct.toFixed(0)}%</span>`;
+}
+
+function renderStats(t, prev) {
   const rangeLabel = RANGE_LABELS[selectedRange].toLowerCase();
   const stats = [
-    { label: 'Sessions',       value: t.sessions.toLocaleString(), sub: rangeLabel },
-    { label: 'Turns',          value: fmt(t.turns),                sub: rangeLabel },
-    { label: 'Input Tokens',   value: fmt(t.input),                sub: rangeLabel },
-    { label: 'Output Tokens',  value: fmt(t.output),               sub: rangeLabel },
-    { label: 'Cache Read',     value: fmt(t.cache_read),           sub: 'from prompt cache' },
-    { label: 'Cache Creation', value: fmt(t.cache_creation),       sub: 'writes to prompt cache' },
-    { label: 'Est. Cost',      value: fmtCostBig(t.cost),          sub: 'API pricing, Apr 2026', color: '#4ade80' },
+    { label: 'Sessions',       value: t.sessions.toLocaleString(), sub: rangeLabel, delta: prev && _deltaBadge(t.sessions, prev.sessions) },
+    { label: 'Turns',          value: fmt(t.turns),                sub: rangeLabel, delta: prev && _deltaBadge(t.turns, prev.turns) },
+    { label: 'Input Tokens',   value: fmt(t.input),                sub: rangeLabel, delta: prev && _deltaBadge(t.input, prev.input) },
+    { label: 'Output Tokens',  value: fmt(t.output),               sub: rangeLabel, delta: prev && _deltaBadge(t.output, prev.output) },
+    { label: 'Cache Read',     value: fmt(t.cache_read),           sub: 'from prompt cache', delta: prev && _deltaBadge(t.cache_read, prev.cache_read) },
+    { label: 'Cache Creation', value: fmt(t.cache_creation),       sub: 'writes to prompt cache', delta: prev && _deltaBadge(t.cache_creation, prev.cache_creation) },
+    { label: 'Est. Cost',      value: fmtCostBig(t.cost),          sub: 'API pricing, Apr 2026', color: '#4ade80', delta: prev && _deltaBadge(t.cost, prev.cost) },
   ];
   document.getElementById('stats-row').innerHTML = stats.map(s => `
     <div class="stat-card">
-      <div class="label">${s.label}</div>
+      <div class="label">${s.label}${s.delta || ''}</div>
       <div class="value" style="${s.color ? 'color:' + s.color : ''}">${esc(s.value)}</div>
       ${s.sub ? `<div class="sub">${esc(s.sub)}</div>` : ''}
     </div>
