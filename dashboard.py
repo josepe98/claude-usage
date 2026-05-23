@@ -521,7 +521,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Claude Code Usage Dashboard</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js" integrity="sha384-e6nUZLBkQ86NJ6TVVKAeSaK8jWa3NhkYWZFomE39AvDbQWeie9PlQqM3pmYW5d1g" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 <style id="active-theme">:root {
     --bg: #f5f5f7; --card: #ffffff; --border: rgba(0,0,0,0.08);
     --text: #1d1d1f; --muted: rgba(0,0,0,0.48); --accent: #0071e3;
