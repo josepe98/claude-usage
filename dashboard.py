@@ -619,6 +619,30 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .footer-content a:hover { text-decoration: underline; }
 
   @media (max-width: 768px) { .charts-grid { grid-template-columns: 1fr; } .chart-card.wide { grid-column: 1; } }
+
+  @media (max-width: 640px) {
+    /* Tighter container */
+    .container { padding: 16px 12px; }
+    /* Header collapses */
+    .header-bar { flex-direction: column; align-items: flex-start; gap: 8px; }
+    .header-bar > div, .header-bar > h1 { width: 100%; }
+    /* Filter bar wraps; range pills become horizontally scrollable */
+    .filter-bar { flex-direction: column; align-items: stretch; gap: 12px; }
+    .range-group { overflow-x: auto; -webkit-overflow-scrolling: touch; white-space: nowrap; }
+    .range-btn { flex-shrink: 0; padding: 6px 10px; }
+    /* Stat grid: 2 cols on phones (3 was cramped) */
+    #stats-row { grid-template-columns: repeat(2, 1fr) !important; gap: 8px; }
+    .stat-card { padding: 12px; }
+    .stat-card .value { font-size: 20px; }
+    /* Tables scroll horizontally so they stay readable */
+    .table-card { overflow-x: auto; }
+    .table-card table { min-width: 600px; }
+    /* Hide the chunkiest columns to keep the totals visible */
+    .table-card th.hide-mobile,
+    .table-card td.hide-mobile { display: none; }
+    /* Charts: smaller fixed height */
+    .chart-wrap { height: 240px; }
+  }
 </style>
 </head>
 <body>
@@ -688,8 +712,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         <th class="sortable" onclick="setModelSort('turns')">Turns <span class="sort-icon" id="msort-turns"></span></th>
         <th class="sortable" onclick="setModelSort('input')">Input <span class="sort-icon" id="msort-input"></span></th>
         <th class="sortable" onclick="setModelSort('output')">Output <span class="sort-icon" id="msort-output"></span></th>
-        <th class="sortable" onclick="setModelSort('cache_read')">Cache Read <span class="sort-icon" id="msort-cache_read"></span></th>
-        <th class="sortable" onclick="setModelSort('cache_creation')">Cache Creation <span class="sort-icon" id="msort-cache_creation"></span></th>
+        <th class="sortable hide-mobile" onclick="setModelSort('cache_read')">Cache Read <span class="sort-icon" id="msort-cache_read"></span></th>
+        <th class="sortable hide-mobile" onclick="setModelSort('cache_creation')">Cache Creation <span class="sort-icon" id="msort-cache_creation"></span></th>
         <th class="sortable" onclick="setModelSort('cost')">Est. Cost <span class="sort-icon" id="msort-cost"></span></th>
       </tr></thead>
       <tbody id="model-cost-body"></tbody>
