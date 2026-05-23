@@ -583,6 +583,38 @@ def _cost_per_turn_stats(conn):
     }
 
 
+# Subscription plan pricing (USD/month). Anthropic's published numbers, May 2026.
+PLANS = {
+    "Free":       {"price": 0,    "included": "~ $5/mo equivalent"},
+    "Pro":        {"price": 20,   "included": "~ $100/mo equivalent"},
+    "Max-5x":     {"price": 100,  "included": "~ $500/mo equivalent"},
+    "Max-20x":    {"price": 200,  "included": "~ $1000/mo equivalent"},
+}
+
+
+def _plan_comparison(month_to_date_usd):
+    """Given API-equivalent spend so far this month, surface which plan would
+    have been cheapest. Heuristic — these mappings are approximate (Pro caps
+    are usage-based not strict)."""
+    rec = None
+    for name, p in PLANS.items():
+        if p["price"] == 0:
+            continue
+        # Pick the cheapest plan whose included usage exceeds month-to-date.
+        # We approximate "included" as 5x the price (Pro: $20 -> $100 worth,
+        # Max-5x: $100 -> $500). Matches Anthropic's public marketing copy.
+        included = p["price"] * 5
+        if month_to_date_usd <= included:
+            rec = name
+            break
+    rec = rec or "Max-20x"
+    return {
+        "month_to_date": round(month_to_date_usd, 2),
+        "recommended": rec,
+        "plans": PLANS,
+    }
+
+
 def get_dashboard_data(db_path=DB_PATH):
     if not db_path.exists():
         return {"error": "Database not found. Run: python cli.py scan"}
@@ -756,6 +788,9 @@ def get_dashboard_data(db_path=DB_PATH):
         s["tags"] = _tags_map.get(s["session_id"], [])
     dow_hour = _dow_hour_heatmap(conn)
     cost_histogram = _cost_per_turn_stats(conn)
+
+    # Plan comparison — reuse mtd computation for plan recommendation.
+    plan_recommendation = _plan_comparison(month_to_date_usd)
     conn.close()
 
     return {
@@ -771,6 +806,8 @@ def get_dashboard_data(db_path=DB_PATH):
         "dow_hour":        dow_hour,
         "cost_histogram":  cost_histogram,
         "generated_at":    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "plan_recommendation": plan_recommendation,
+        "generated_at":       datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
 
@@ -1363,6 +1400,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <div id="budget-bar" style="display:none; margin:0 0 16px 0;"><div style="display:flex; justify-content:space-between; align-items:baseline; margin-bottom:6px;"><div style="font-size:12px; color:var(--muted);">Monthly budget <span id="budget-label"></span></div><div style="font-size:11px; color:var(--muted);"><a href="#" onclick="_editBudget(); return false;" style="color:var(--muted); text-decoration:underline;">edit</a></div></div><div id="budget-track" style="height:6px; background:rgba(255,255,255,0.08); border-radius:3px; overflow:hidden;"><div id="budget-fill" style="height:100%; background:#4ade80; transition: width 0.3s, background-color 0.3s;"></div></div></div>
   <div id="anomaly-banner" style="display:none; padding:10px 14px; margin: 0 0 12px 0; background:rgba(248,113,113,0.12); border-left:3px solid #f87171; border-radius:6px; color:#f87171; font-size:13px;"></div>
     <div class="stats-row" id="stats-row"></div>
+    <div id="plan-card" style="display:none; margin:0 0 16px 0; padding:10px 14px; background:rgba(74,222,128,0.08); border-radius:8px; font-size:12px; color:var(--text);"></div>
   <div class="charts-grid">
     <div class="chart-card wide">
       <h2 id="daily-chart-title">Daily Token Usage</h2>
@@ -2132,6 +2170,7 @@ function applyFilter() {
   renderAnomalyBanner();
   renderDowHourHeatmap();
   renderHistogram();
+  renderPlanCard();
   lastFilteredSessions = sortSessions(filteredSessions);
   lastByProject = sortProjects(byProject);
   lastByProjectBranch = sortProjectBranch(byProjectBranch);
@@ -2708,6 +2747,17 @@ function renderHistogram() {  // eslint-disable-line no-unused-vars
       scales: { x: { ticks: { font: { size: 9 } } }, y: { beginAtZero: true } },
     },
   });
+function renderPlanCard() {  // eslint-disable-line no-unused-vars
+  const r = rawData && rawData.plan_recommendation;
+  const el = document.getElementById("plan-card");
+  if (!el || !r) return;
+  if (!r.month_to_date || r.month_to_date < 1) {
+    el.style.display = "none";
+    return;
+  }
+  const p = r.plans[r.recommended];
+  el.style.display = "";
+  el.innerHTML = \`<strong>Plan recommendation:</strong> at $\${r.month_to_date.toFixed(2)} API-equivalent this month, <strong>\${r.recommended}</strong> ($\${p.price}/mo, includes \${p.included}) would be the cheapest subscription. <span style="color:var(--muted)">Compare: \${Object.entries(r.plans).map(([n, pp]) => n + " $" + pp.price).join(" • ")}</span>\`;
 }
 
 function renderProjectChart(byProject) {
