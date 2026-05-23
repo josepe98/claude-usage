@@ -4,6 +4,7 @@ dashboard.py - Local web dashboard served on localhost:8080.
 
 import json
 import os
+import re
 import sqlite3
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
@@ -14,6 +15,63 @@ from datetime import datetime
 
 DB_PATH    = Path.home() / ".claude" / "usage.db"
 THEMES_DIR = Path.home() / ".claude" / "claude-usage" / "themes"
+PII_PATTERNS_PATH = Path.home() / ".claude" / "pii-patterns.json"
+
+
+# ── PII / sensitive-content scanner ────────────────────────────────────────────
+# SOFT warning only — flags sessions whose project name or branch contains
+# common secret/credential markers. Patterns are configurable via
+# ~/.claude/pii-patterns.json (a JSON list of regex strings); fallback below.
+
+def _default_pii_patterns():
+    """Return the built-in list of regex patterns for sensitive markers.
+    Each pattern is matched case-insensitively against project + branch text.
+    """
+    return [
+        r"secret",
+        r"credential",
+        r"password",
+        r"api[_-]?key",
+        r"token",
+        r"\.env",
+        r"\.aws/credentials",
+        r"\bSSN",
+        r"private[_-]?key",
+        r"\.ssh/",
+    ]
+
+
+def _load_pii_patterns(path=PII_PATTERNS_PATH):
+    """Load user-overridden PII patterns from ~/.claude/pii-patterns.json,
+    or fall back to the defaults if the file is missing or malformed.
+    The override file must contain a JSON list of regex strings.
+    """
+    try:
+        if path and Path(path).exists():
+            data = json.loads(Path(path).read_text())
+            if isinstance(data, list) and all(isinstance(p, str) for p in data):
+                return data
+    except Exception:
+        pass
+    return _default_pii_patterns()
+
+
+def _pii_check(text, patterns):
+    """Return a list of pattern strings that matched the given text
+    (case-insensitive). Empty list = no sensitive markers found.
+    Never raises on a bad regex — invalid patterns are silently skipped.
+    """
+    if not text:
+        return []
+    matches = []
+    for pat in patterns:
+        try:
+            if re.search(pat, text, re.IGNORECASE):
+                matches.append(pat)
+        except re.error:
+            continue
+    return matches
+
 
 # ── Bundled themes ─────────────────────────────────────────────────────────────
 BUNDLED_THEMES = [
@@ -307,6 +365,12 @@ def get_dashboard_data(db_path=DB_PATH):
             "cache_read":    r["total_cache_read"] or 0,
             "cache_creation": r["total_cache_creation"] or 0,
         })
+
+    # Sensitive-content scan: SOFT warning, runs locally, no data leaves the box.
+    _pii_patterns = _load_pii_patterns()
+    for s in sessions_all:
+        haystack = f"{s.get('project', '')} {s.get('branch', '')}"
+        s["sensitive_match"] = _pii_check(haystack, _pii_patterns)
 
     conn.close()
 
@@ -1739,6 +1803,16 @@ function renderPareto(filteredSessions) {  // eslint-disable-line no-unused-vars
   el.innerHTML = `<strong>Cost concentration:</strong> top 5 sessions account for <strong>${pct}%</strong> of spend in the current range. <span style="color:var(--muted)">(${names})</span>`;
 }
 
+function _renderSensitiveBadge(s) {  // eslint-disable-line no-unused-vars
+  // SOFT warning chip — flags sessions whose project/branch matched a
+  // sensitive-content regex. Never blocks; just shows a tooltip listing
+  // the matched keywords. Patterns configurable via ~/.claude/pii-patterns.json.
+  const matches = s && s.sensitive_match;
+  if (!matches || !matches.length) return "";
+  const tip = `Sensitive markers matched: ${matches.join(', ')}`;
+  return ` <span class="pii-badge" title="${esc(tip)}" aria-label="${esc(tip)}" style="display:inline-block;margin-left:4px;padding:0 5px;border-radius:6px;font-size:10px;line-height:14px;background:rgba(255,159,10,0.18);color:#b06b00;border:1px solid rgba(255,159,10,0.45);cursor:help;vertical-align:middle;">&#9888;</span>`;
+}
+
 function renderProjectChart(byProject) {
   const top = byProject.slice(0, 10);
   const ctx = document.getElementById('chart-project').getContext('2d');
@@ -1770,9 +1844,10 @@ function renderSessionsTable(sessions) {
     const costCell = isBillable(s.model)
       ? `<td class="cost">${fmtCost(cost)}</td>`
       : `<td class="cost-na">n/a</td>`;
+    const piiBadge = _renderSensitiveBadge(s);
     const sessionCell = s.session_name
-      ? `<td><span class="session-name">${esc(s.session_name)}</span> <span class="muted" style="font-family:monospace">(${esc(s.session_id)}&hellip;)</span></td>`
-      : `<td class="muted" style="font-family:monospace">${esc(s.session_id)}&hellip;</td>`;
+      ? `<td><span class="session-name">${esc(s.session_name)}</span> <span class="muted" style="font-family:monospace">(${esc(s.session_id)}&hellip;)</span>${piiBadge}</td>`
+      : `<td class="muted" style="font-family:monospace">${esc(s.session_id)}&hellip;${piiBadge}</td>`;
     return `<tr class="session-row ${selectedSessionId === s.session_id_full ? 'selected' : ''}" data-session-id="${esc(s.session_id_full)}">
       ${sessionCell}
       <td>${esc(s.project)}</td>
