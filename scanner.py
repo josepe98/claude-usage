@@ -16,8 +16,56 @@ XCODE_PROJECTS_DIR = Path.home() / "Library" / "Developer" / "Xcode" / "CodingAs
 DB_PATH = Path.home() / ".claude" / "usage.db"
 DEFAULT_PROJECTS_DIRS = [PROJECTS_DIR, XCODE_PROJECTS_DIR]
 
+# Multi-account tracking. Rules live in ~/.claude/accounts.json and map a
+# cwd-substring fragment -> account label. A session's account is the first
+# rule whose key appears in the session's cwd; otherwise "default".
+ACCOUNTS_CONFIG_PATH = Path.home() / ".claude" / "accounts.json"
+DEFAULT_ACCOUNT = "default"
+
 # Higher number = higher priority when choosing a session's primary model
 MODEL_PRIORITY = {"opus": 3, "sonnet": 2, "haiku": 1}
+
+
+def load_account_rules(path=None):
+    """Load {cwd-fragment: account-name} from ~/.claude/accounts.json.
+
+    Returns an empty dict on any error (missing file, bad JSON, wrong shape)
+    so the scanner can never crash on a malformed config — every session just
+    falls back to the default account. The default path is re-read from the
+    module-level ACCOUNTS_CONFIG_PATH each call, so tests can monkeypatch it.
+    """
+    if path is None:
+        path = ACCOUNTS_CONFIG_PATH
+    try:
+        path = Path(path)
+        if not path.exists():
+            return {}
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return {}
+        # Coerce non-string values to str so a typo (e.g. number) doesn't blow up.
+        # Drop keys starting with "_" so users can keep "_comment" annotations
+        # in their config without them being treated as substring rules.
+        return {str(k): str(v) for k, v in data.items() if k and not str(k).startswith("_")}
+    except Exception:
+        return {}
+
+
+def account_for_cwd(cwd, rules):
+    """Return the account label for a cwd.
+
+    Rules are tried in insertion order. The first rule whose key appears as
+    a substring of cwd wins. With no match (or an empty cwd) the default
+    account label is returned. Matching is plain substring, not glob — keeps
+    the config dead simple and predictable.
+    """
+    if not cwd or not rules:
+        return DEFAULT_ACCOUNT
+    for fragment, account in rules.items():
+        if fragment and fragment in cwd:
+            return account or DEFAULT_ACCOUNT
+    return DEFAULT_ACCOUNT
 
 
 def _model_priority(model):
@@ -48,6 +96,7 @@ def _migrate_schema(conn):
     for sql in (
         "ALTER TABLE turns ADD COLUMN cache_1h_tokens INTEGER DEFAULT 0",
         "ALTER TABLE sessions ADD COLUMN total_cache_1h INTEGER DEFAULT 0",
+        "ALTER TABLE sessions ADD COLUMN account TEXT DEFAULT 'default'",
     ):
         try:
             conn.execute(sql)
@@ -70,7 +119,8 @@ def init_db(conn):
             total_cache_1h          INTEGER DEFAULT 0,
             model           TEXT,
             turn_count      INTEGER DEFAULT 0,
-            session_name    TEXT
+            session_name    TEXT,
+            account         TEXT DEFAULT 'default'
         );
 
         CREATE TABLE IF NOT EXISTS turns (
@@ -187,6 +237,7 @@ def parse_jsonl_file(filepath):
                         "model": None,
                         "custom_title": None,
                         "agent_name": None,
+                        "cwd": record.get("cwd", ""),
                     }
 
                 # Capture session_name from any record (custom-title / agent-name types
@@ -215,6 +266,9 @@ def parse_jsonl_file(filepath):
                 # (e.g. a custom-title record preceded the first user/assistant line)
                 if cwd and (not meta["project_name"] or meta["project_name"] == "unknown"):
                     meta["project_name"] = project_name_from_cwd(cwd)
+                # Track the latest known cwd for account assignment.
+                if cwd:
+                    meta["cwd"] = cwd
 
                 if rtype == "assistant":
                     msg = record.get("message", {})
@@ -274,9 +328,16 @@ def parse_jsonl_file(filepath):
     return list(session_meta.values()), turns, line_count
 
 
-def aggregate_sessions(session_metas, turns):
-    """Aggregate turn data back into session-level stats."""
+def aggregate_sessions(session_metas, turns, account_rules=None):
+    """Aggregate turn data back into session-level stats.
+
+    `account_rules` is a {cwd-fragment: account-name} dict (see
+    `load_account_rules`). When omitted the rules are loaded fresh from the
+    on-disk config so callers don't have to.
+    """
     from collections import defaultdict, Counter
+    if account_rules is None:
+        account_rules = load_account_rules()
 
     session_stats = defaultdict(lambda: {
         "total_input_tokens": 0,
@@ -313,6 +374,16 @@ def aggregate_sessions(session_metas, turns):
         merged["session_name"] = resolve_session_name(
             meta.get("custom_title"), meta.get("agent_name")
         )
+        # Prefer the session's recorded cwd; fall back to a representative turn's
+        # cwd so account assignment still works for sessions whose meta-init record
+        # lacked a cwd field.
+        cwd_for_account = meta.get("cwd") or ""
+        if not cwd_for_account:
+            for t in turns:
+                if t.get("session_id") == sid and t.get("cwd"):
+                    cwd_for_account = t["cwd"]
+                    break
+        merged["account"] = account_for_cwd(cwd_for_account, account_rules)
         result.append(merged)
     return result
 
@@ -332,14 +403,15 @@ def upsert_sessions(conn, sessions):
                     (session_id, project_name, first_timestamp, last_timestamp,
                      git_branch, total_input_tokens, total_output_tokens,
                      total_cache_read, total_cache_creation, total_cache_1h, model, turn_count,
-                     session_name)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     session_name, account)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 s["session_id"], s["project_name"], s["first_timestamp"],
                 s["last_timestamp"], s["git_branch"],
                 s["total_input_tokens"], s["total_output_tokens"],
                 s["total_cache_read"], s["total_cache_creation"], s.get("total_cache_1h", 0),
-                s["model"], s["turn_count"], s.get("session_name")
+                s["model"], s["turn_count"], s.get("session_name"),
+                s.get("account", DEFAULT_ACCOUNT),
             ))
         else:
             # Update: add new tokens on top of existing (since we only insert new turns)
@@ -366,7 +438,8 @@ def upsert_sessions(conn, sessions):
                     total_cache_1h = total_cache_1h + ?,
                     turn_count = turn_count + ?,
                     model = ?,
-                    session_name = COALESCE(NULLIF(?, ''), session_name)
+                    session_name = COALESCE(NULLIF(?, ''), session_name),
+                    account = CASE WHEN ? != ? THEN ? ELSE account END
                 WHERE session_id = ?
             """, (
                 s["last_timestamp"],
@@ -375,6 +448,8 @@ def upsert_sessions(conn, sessions):
                 s.get("total_cache_1h", 0),
                 s["turn_count"], model_to_set,
                 s.get("session_name"),
+                s.get("account", DEFAULT_ACCOUNT), DEFAULT_ACCOUNT,
+                s.get("account", DEFAULT_ACCOUNT),
                 s["session_id"]
             ))
 
@@ -524,6 +599,7 @@ def scan(projects_dir=None, projects_dirs=None, db_path=DB_PATH, verbose=True):
                                 "model": None,
                                 "custom_title": None,
                                 "agent_name": None,
+                                "cwd": record.get("cwd", ""),
                             }
 
                         # Capture session_name updates from any record
@@ -543,6 +619,8 @@ def scan(projects_dir=None, projects_dirs=None, db_path=DB_PATH, verbose=True):
                             meta["last_timestamp"] = timestamp
                         if cwd and (not meta["project_name"] or meta["project_name"] == "unknown"):
                             meta["project_name"] = project_name_from_cwd(cwd)
+                        if cwd:
+                            meta["cwd"] = cwd
 
                         if rtype == "assistant":
                             msg = record.get("message", {})
