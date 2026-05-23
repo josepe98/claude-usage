@@ -65,6 +65,8 @@ def _save_project_aliases(aliases, path=None):
         fh.write("\n")
     os.replace(tmp, p)
     return cleaned
+from pricing import PRICING
+from datetime import datetime, timedelta, date
 
 
 # ── Bundled themes ─────────────────────────────────────────────────────────────
@@ -810,6 +812,31 @@ def _session_sparklines(conn, session_ids):
             bins[idx] += 1
         out[sid] = bins
     return out
+def _compute_streak(conn, today=None):
+    """Return the number of consecutive calendar days (UTC) ending at
+    ``today`` on which the user had >=1 assistant turn. Future-dated rows are
+    ignored so a bad clock can't inflate the streak. Returns 0 when there's
+    no activity today (the streak only counts unbroken runs anchored at
+    today). ``today`` is injectable for tests; defaults to UTC date now."""
+    today = today or datetime.utcnow().date()
+    today_iso = today.isoformat()
+    rows = conn.execute(
+        """
+        SELECT DISTINCT substr(timestamp, 1, 10) AS day
+        FROM turns
+        WHERE timestamp IS NOT NULL
+          AND length(timestamp) >= 10
+          AND substr(timestamp, 1, 10) <= ?
+        """,
+        (today_iso,),
+    ).fetchall()
+    days = {r["day"] if isinstance(r, sqlite3.Row) else r[0] for r in rows}
+    streak = 0
+    cursor = today
+    while cursor.isoformat() in days:
+        streak += 1
+        cursor -= timedelta(days=1)
+    return streak
 
 
 def get_dashboard_data(db_path=DB_PATH):
@@ -1015,6 +1042,7 @@ def get_dashboard_data(db_path=DB_PATH):
     )
     for s in sessions_all:
         s["sparkline"] = _sparkline_data.get(s["session_id"], [])
+    streak = _compute_streak(conn)
     conn.close()
 
     return {
@@ -1031,6 +1059,7 @@ def get_dashboard_data(db_path=DB_PATH):
         "cost_histogram":  cost_histogram,
         "project_budgets": project_budgets,
         "subagent_split": subagent_split,
+        "streak":          streak,
         "generated_at":    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "plan_recommendation": plan_recommendation,
         "generated_at":       datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -1452,6 +1481,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   header { position: sticky; top: 0; z-index: 100; background: rgba(255,255,255,0.85); backdrop-filter: saturate(180%) blur(20px); -webkit-backdrop-filter: saturate(180%) blur(20px); border-bottom: 1px solid var(--border); padding: 0 24px; height: 48px; display: flex; align-items: center; justify-content: space-between; }
   header h1 { font-size: 17px; font-weight: 600; color: var(--text); letter-spacing: -0.374px; }
   header .meta { color: var(--muted); font-size: 12px; letter-spacing: -0.12px; }
+  .streak-badge { display: inline-flex; align-items: center; gap: 4px; background: rgba(255,159,10,0.12); color: #d97706; border: 1px solid rgba(255,159,10,0.25); border-radius: 980px; padding: 2px 10px; font-size: 12px; font-weight: 600; letter-spacing: -0.12px; line-height: 1.4; white-space: nowrap; }
+  .streak-badge[hidden] { display: none; }
   .appearance-btn { background: transparent; border: 1px solid var(--border); border-radius: 6px; color: var(--muted); font-size: 12px; padding: 4px 12px; cursor: pointer; letter-spacing: -0.12px; transition: all 0.15s; white-space: nowrap; }
   .appearance-btn:hover { border-color: var(--accent); color: var(--accent); }
   .link-btn { background: transparent; border: none; color: var(--muted); cursor: pointer; font-size: 11px; padding: 4px 8px; }
@@ -1601,6 +1632,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <header>
   <h1>Claude Code Usage Dashboard</h1>
   <div style="display:flex;align-items:center;gap:12px">
+    <span id="streak-badge" class="streak-badge" hidden title="Consecutive days (UTC) with at least one assistant turn"></span>
     <div class="meta" id="meta">Loading...</div>
     <button class="link-btn" onclick="_resetPrefs()" title="Clear saved range / model / theme preferences and reload">Reset prefs</button>
       <button id="rescan-btn" onclick="triggerRescan()" title="Rebuild the database from scratch by re-scanning all JSONL files. Use if data looks stale or costs seem wrong.">&#x21bb; Rescan</button>
@@ -3527,6 +3559,18 @@ function loadData() {
     }
     const refreshNote = rangeIncludesToday(selectedRange) ? ' \u00b7 Auto-refresh in 30s' : '';
     document.getElementById('meta').textContent = 'Updated: ' + d.generated_at + refreshNote;
+
+    const streakEl = document.getElementById('streak-badge');
+    if (streakEl) {
+      const n = (d && typeof d.streak === 'number') ? d.streak : 0;
+      if (n > 0) {
+        streakEl.textContent = '\ud83d\udd25 ' + n + '-day streak';
+        streakEl.hidden = false;
+      } else {
+        streakEl.textContent = '';
+        streakEl.hidden = true;
+      }
+    }
 
     const isFirstLoad = rawData === null;
     rawData = d;
