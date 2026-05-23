@@ -798,7 +798,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <div style="display:flex;align-items:center;gap:12px">
     <div class="meta" id="meta">Loading...</div>
     <button class="link-btn" onclick="_resetPrefs()" title="Clear saved range / model / theme preferences and reload">Reset prefs</button>
-      <button id="rescan-btn" onclick="triggerRescan()" title="Rebuild the database from scratch by re-scanning all JSONL files. Use if data looks stale or costs seem wrong.">&#x21bb; Rescan</button>
+    <button id="reset-btn" onclick="_confirmReset()" title="Delete usage.db entirely and re-create empty schema. Run scan afterwards to repopulate." style="background: var(--card); border: 1px solid var(--border); color: var(--muted); padding: 4px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; margin-left: 6px;">&#x1f5d1; Reset DB</button>
+    <button id="rescan-btn" onclick="triggerRescan()" title="Rebuild the database from scratch by re-scanning all JSONL files. Use if data looks stale or costs seem wrong.">&#x21bb; Rescan</button>
     <button class="appearance-btn" onclick="window.open('/themes','_blank')">Appearance</button>
     <select id="theme-quick" onchange="_onThemeQuickChange(this.value)" title="Quick-switch theme" style="background: var(--card); border: 1px solid var(--border); border-radius: 6px; color: var(--text); padding: 4px 8px; font-size: 12px; margin-right: 6px;"></select>
   </div>
@@ -2013,7 +2014,18 @@ function exportProjectBranchCSV() {
 }
 
 // ── Rescan ────────────────────────────────────────────────────────────────
-async function triggerRescan() {
+async function _confirmReset() {  // eslint-disable-line no-unused-vars
+  if (!confirm("This will delete usage.db entirely. You'll need to re-run\nscan from the terminal afterwards to repopulate it.\n\nContinue?")) return;
+  fetch("/api/reset", { method: "POST" })
+    .then(r => r.json())
+    .then(d => {
+      alert(d.ok ? "Database reset. Run python cli.py scan to repopulate." : ("Reset failed: " + (d.error || "unknown")));
+      if (d.ok) loadData();
+    })
+    .catch(e => alert("Reset error: " + e));
+}
+
+function triggerRescan() {
   const btn = document.getElementById('rescan-btn');
   btn.disabled = true;
   btn.textContent = '\u21bb Scanning...';
@@ -2187,6 +2199,30 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
     def do_POST(self):
+        path = urlparse(self.path).path if 'urlparse' in globals() else self.path.split('?', 1)[0]
+        if path == "/api/reset":
+            # Wipe usage.db entirely. Caller is expected to re-run scan
+            # afterwards to repopulate (or use /api/rescan?full=1 in
+            # forks where that exists).
+            try:
+                if DB_PATH.exists():
+                    DB_PATH.unlink()
+                # Re-create empty schema so /api/data doesn't 500 on next load
+                import scanner
+                conn = scanner.get_db(DB_PATH)
+                scanner.init_db(conn)
+                conn.close()
+                body = json.dumps({"ok": True, "message": "Database reset."}).encode("utf-8")
+                self.send_response(200)
+            except Exception as e:  # noqa: BLE001
+                body = json.dumps({"ok": False, "error": str(e)}).encode("utf-8")
+                self.send_response(500)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        
         path = urlparse(self.path).path
         if path == "/api/rescan":
             # Default: incremental scan (fast, non-destructive).
