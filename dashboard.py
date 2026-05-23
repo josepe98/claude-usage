@@ -1142,7 +1142,7 @@ function readURLRange() {
 }
 
 function setRange(range) {
-  _savePrefs({ range: r });
+  _savePrefs({ range: range });
   selectedRange = range;
   document.querySelectorAll('.range-btn').forEach(btn =>
     btn.classList.toggle('active', btn.dataset.range === range)

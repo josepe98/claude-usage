@@ -19,7 +19,7 @@ class TestLocalStoragePrefs(unittest.TestCase):
 
     def test_setRange_writes_through(self):
         # When the user clicks a range button, the new range must persist.
-        self.assertIn("_savePrefs({ range: r })", dashboard.HTML_TEMPLATE)
+        self.assertIn("_savePrefs({ range: range })", dashboard.HTML_TEMPLATE)
 
     def test_setHourlyTZ_writes_through(self):
         self.assertIn("_savePrefs({ hourlyTZ: tz })", dashboard.HTML_TEMPLATE)
