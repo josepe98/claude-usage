@@ -181,6 +181,51 @@ def get_themes():
     return list(themes.values())
 
 
+
+def _cost_by_branch(sessions):
+    """Aggregate sessions by (project, branch) tuple.
+
+    Mirrors the JS ``_costByBranch`` helper so the same aggregation is
+    available server-side for tests and downstream consumers.
+
+    Each input row must have: ``project``, ``branch``, ``input``,
+    ``output``, ``cache_read``, ``cache_creation``, ``turns``, ``cost``.
+
+    Empty/missing branch values are normalised to the literal string
+    ``"(default)"`` (matches the UI label for un-branched activity).
+
+    Returns a list sorted descending by ``cost``.
+    """
+    DEFAULT = "(default)"
+    by_key = {}
+    for s in sessions or []:
+        project = s.get("project") or ""
+        branch = (s.get("branch") or "").strip() or DEFAULT
+        key = (project, branch)
+        row = by_key.get(key)
+        if row is None:
+            row = {
+                "project": project,
+                "branch": branch,
+                "sessions": 0,
+                "turns": 0,
+                "input": 0,
+                "output": 0,
+                "cache_read": 0,
+                "cache_creation": 0,
+                "cost": 0.0,
+            }
+            by_key[key] = row
+        row["sessions"] += 1
+        row["turns"] += s.get("turns", 0) or 0
+        row["input"] += s.get("input", 0) or 0
+        row["output"] += s.get("output", 0) or 0
+        row["cache_read"] += s.get("cache_read", 0) or 0
+        row["cache_creation"] += s.get("cache_creation", 0) or 0
+        row["cost"] += float(s.get("cost", 0) or 0)
+    return sorted(by_key.values(), key=lambda r: -r["cost"])
+
+
 def _cost_concentration(sessions_with_cost, top_n=5):
     """Compute Pareto-style concentration: top-N sessions' cost as % of total."""
     if not sessions_with_cost:
@@ -1256,6 +1301,23 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <tbody id="project-branch-cost-body"></tbody>
     </table>
   </div>
+  <div class="table-card" id="cost-by-branch-card">
+    <div class="section-header"><div class="section-title">Cost by Branch</div><button class="export-btn" onclick="exportBranchCSV()" title="Export branch breakdown to CSV">&#x2913; CSV</button></div>
+    <table>
+      <thead><tr>
+        <th class="sortable" onclick="setBranchOnlySort('project')">Project <span class="sort-icon" id="cbsort-project"></span></th>
+        <th class="sortable" onclick="setBranchOnlySort('branch')">Branch <span class="sort-icon" id="cbsort-branch"></span></th>
+        <th class="sortable" onclick="setBranchOnlySort('sessions')">Sessions <span class="sort-icon" id="cbsort-sessions"></span></th>
+        <th class="sortable" onclick="setBranchOnlySort('turns')">Turns <span class="sort-icon" id="cbsort-turns"></span></th>
+        <th class="sortable" onclick="setBranchOnlySort('input')">Input <span class="sort-icon" id="cbsort-input"></span></th>
+        <th class="sortable" onclick="setBranchOnlySort('output')">Output <span class="sort-icon" id="cbsort-output"></span></th>
+        <th class="sortable" onclick="setBranchOnlySort('cache_read')">Cache Read <span class="sort-icon" id="cbsort-cache_read"></span></th>
+        <th class="sortable" onclick="setBranchOnlySort('cache_creation')">Cache Creation <span class="sort-icon" id="cbsort-cache_creation"></span></th>
+        <th class="sortable" onclick="setBranchOnlySort('cost')">Est. Cost <span class="sort-icon" id="cbsort-cost"></span></th>
+      </tr></thead>
+      <tbody id="branch-only-cost-body"></tbody>
+    </table>
+  </div>
 </div>
 
 <div id="md-toast" class="md-toast" role="status" aria-live="polite">Copied as markdown!</div>
@@ -1377,10 +1439,13 @@ let projectSortCol = 'cost';
 let projectSortDir = 'desc';
 let branchSortCol = 'cost';
 let branchSortDir = 'desc';
+let cbSortCol = 'cost';
+let cbSortDir = 'desc';
 let lastFilteredSessions = [];
 let lastByProject = [];
 let lastByProjectBranch = [];
 let lastByModel = [];
+let lastByBranch = [];
 let sessionSortDir = 'desc';
 let hourlyTZ = (_loadPrefs().hourlyTZ) || 'local';  // 'local' or 'utc'
 
@@ -1768,6 +1833,10 @@ function applyFilter() {
   }
   const byProjectBranch = Object.values(projBranchMap).sort((a, b) => b.cost - a.cost);
 
+  // By branch (project + branch tuple, with cache columns surfaced separately
+  // from the existing Project & Branch card so users can see cache mix per branch)
+  const byBranch = _costByBranch(filteredSessions);
+
   // Totals
   // Count distinct models that have token usage in the filtered window but
   // aren't priced (e.g. router proxies, custom finetunes). The Est. Cost
@@ -1814,10 +1883,12 @@ function applyFilter() {
   lastByProject = sortProjects(byProject);
   lastByProjectBranch = sortProjectBranch(byProjectBranch);
   lastByModel = sortModels(byModel);
+  lastByBranch = sortBranchOnly(byBranch);
   renderSessionsTable(lastFilteredSessions.slice(0, 20));
   renderModelCostTable(byModel);
   renderProjectCostTable(lastByProject.slice(0, 20));
   renderProjectBranchCostTable(lastByProjectBranch.slice(0, 20));
+  renderBranchOnlyCostTable(lastByBranch.slice(0, 20));
 
   const visibleSessions = lastFilteredSessions.slice(0, 20);
   if (!visibleSessions.length) {
@@ -2608,6 +2679,100 @@ function copyProjectBranchMD() {
     return [pb.project, pb.branch, pb.sessions, pb.turns, pb.input, pb.output, '$' + pb.cost.toFixed(4)];
   });
   _copyMD('project-branch-cost-table', headers, rows);
+}
+
+// -- Cost by Branch (project + branch tuple, with cache columns) ----------
+// Mirrors the Python _cost_by_branch helper so tests can verify shape.
+function _costByBranch(sessions) {
+  const DEFAULT = '(default)';
+  const map = {};
+  for (const s of sessions || []) {
+    const project = s.project || '';
+    const branch = (s.branch && s.branch.trim()) ? s.branch : DEFAULT;
+    const key = project + '\x00' + branch;
+    if (!map[key]) {
+      map[key] = {
+        project: project,
+        branch: branch,
+        sessions: 0,
+        turns: 0,
+        input: 0,
+        output: 0,
+        cache_read: 0,
+        cache_creation: 0,
+        cost: 0,
+      };
+    }
+    const r = map[key];
+    r.sessions++;
+    r.turns          += s.turns || 0;
+    r.input          += s.input || 0;
+    r.output         += s.output || 0;
+    r.cache_read     += s.cache_read || 0;
+    r.cache_creation += s.cache_creation || 0;
+    r.cost += calcCost(s.model, s.input, s.output, s.cache_read, s.cache_creation, s.cache_1h);
+  }
+  return Object.values(map).sort((a, b) => b.cost - a.cost);
+}
+
+function setBranchOnlySort(col) {
+  if (cbSortCol === col) {
+    cbSortDir = cbSortDir === 'desc' ? 'asc' : 'desc';
+  } else {
+    cbSortCol = col;
+    cbSortDir = (col === 'project' || col === 'branch') ? 'asc' : 'desc';
+  }
+  updateBranchOnlySortIcons();
+  applyFilter();
+}
+
+function updateBranchOnlySortIcons() {
+  document.querySelectorAll('[id^="cbsort-"]').forEach(el => el.textContent = '');
+  const icon = document.getElementById('cbsort-' + cbSortCol);
+  if (icon) icon.textContent = cbSortDir === 'desc' ? ' \u25bc' : ' \u25b2';
+}
+
+function sortBranchOnly(rows) {
+  return [...rows].sort((a, b) => {
+    const av = a[cbSortCol];
+    const bv = b[cbSortCol];
+    if (typeof av === 'string' || typeof bv === 'string') {
+      const sa = (av || '').toLowerCase();
+      const sb = (bv || '').toLowerCase();
+      if (sa < sb) return cbSortDir === 'desc' ? 1 : -1;
+      if (sa > sb) return cbSortDir === 'desc' ? -1 : 1;
+      return 0;
+    }
+    const na = av ?? 0;
+    const nb = bv ?? 0;
+    if (na < nb) return cbSortDir === 'desc' ? 1 : -1;
+    if (na > nb) return cbSortDir === 'desc' ? -1 : 1;
+    return 0;
+  });
+}
+
+function renderBranchOnlyCostTable(rows) {
+  document.getElementById('branch-only-cost-body').innerHTML = sortBranchOnly(rows).map(b => {
+    return `<tr>
+      <td>${esc(b.project)}</td>
+      <td class="muted" style="font-family:monospace">${esc(b.branch)}</td>
+      <td class="num">${b.sessions}</td>
+      <td class="num">${fmt(b.turns)}</td>
+      <td class="num">${fmt(b.input)}</td>
+      <td class="num">${fmt(b.output)}</td>
+      <td class="num">${fmt(b.cache_read)}</td>
+      <td class="num">${fmt(b.cache_creation)}</td>
+      <td class="cost">${fmtCost(b.cost)}</td>
+    </tr>`;
+  }).join('');
+}
+
+function exportBranchCSV() {
+  const header = ['Project', 'Branch', 'Sessions', 'Turns', 'Input', 'Output', 'Cache Read', 'Cache Creation', 'Est. Cost'];
+  const rows = lastByBranch.map(b => {
+    return [b.project, b.branch, b.sessions, b.turns, b.input, b.output, b.cache_read, b.cache_creation, b.cost.toFixed(4)];
+  });
+  downloadCSV('branches', header, rows);
 }
 
 // ── Rescan ────────────────────────────────────────────────────────────────
