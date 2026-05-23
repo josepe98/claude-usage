@@ -793,6 +793,15 @@ def cmd_dashboard(projects_dir=None, host=None, port=None):
     serve(host=host, port=port, share_token=share_token)
 
 
+
+def cmd_tray(url=None):
+    """Launch the menu-bar / tray app showing today's spend."""
+    import tray as tray_mod
+    base = url or f"http://{os.environ.get('HOST', 'localhost')}:{os.environ.get('PORT', '8080')}"
+    sys.exit(tray_mod.run(base))
+
+
+
 # ── Theme command ──────────────────────────────────────────────────────────────
 
 def cmd_theme():
@@ -1197,6 +1206,7 @@ Usage:
   python3 cli.py theme <list|add|remove>          Manage UI themes
   python3 cli.py completions <bash|zsh|fish>      Print shell tab-completion script
   python3 cli.py install-git-hook [--global]      Install post-commit hook (commit -> session trace)
+  python3 cli.py tray [--url URL]                 Launch tray / menu-bar app
 """
 
 COMMANDS = {
@@ -1213,6 +1223,7 @@ COMMANDS = {
     "theme": cmd_theme,
     "completions": cmd_completions,
     "install-git-hook": cmd_install_git_hook,
+    "tray": cmd_tray,
 }
 
 def parse_named_arg(args, flag):
@@ -1263,5 +1274,7 @@ if __name__ == "__main__":
             period=parse_named_arg(rest, "--period") or "30d",
             out=parse_named_arg(rest, "--out"),
         )
+    elif command == "tray":
+        cmd_tray(url=parse_named_arg(rest, "--url"))
     else:
         COMMANDS[command]()
