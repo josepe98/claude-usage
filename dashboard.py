@@ -1239,7 +1239,7 @@ function renderHourlyChart(agg) {
   const labels = agg.hours.map(h => (h.peak ? '⚡ ' : '') + formatHourLabel(h.hour));
   const turns  = agg.hours.map(h => h.avgTurns);
   const output = agg.hours.map(h => h.avgOutput);
-  const barColors = agg.hours.map(h => h.peak ? 'rgba(248,113,113,0.8)' : TOKEN_COLORS.input);
+  const barColors = agg.hours.map(h => h.peak ? 'rgba(248,113,113,0.8)' : tokenColors().input);
 
   charts.hourly = new Chart(ctx, {
     data: {
@@ -1257,7 +1257,7 @@ function renderHourlyChart(agg) {
           type: 'line',
           label: 'Avg output tokens / hour',
           data: output,
-          borderColor: TOKEN_COLORS.output,
+          borderColor: tokenColors().output,
           backgroundColor: 'rgba(167,139,250,0.15)',
           borderWidth: 2,
           pointRadius: 2,
