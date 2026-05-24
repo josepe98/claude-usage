@@ -2025,7 +2025,7 @@ async function _confirmReset() {  // eslint-disable-line no-unused-vars
     .catch(e => alert("Reset error: " + e));
 }
 
-function triggerRescan() {
+async function triggerRescan() {
   const btn = document.getElementById('rescan-btn');
   btn.disabled = true;
   btn.textContent = '\u21bb Scanning...';
@@ -2033,20 +2033,7 @@ function triggerRescan() {
     const resp = await fetch('/api/rescan', { method: 'POST' });
     const d = await resp.json();
     btn.textContent = '\u21bb Rescan (' + d.new + ' new, ' + d.updated + ' updated)';
-    await 
-
-// Apply localStorage prefs at startup if URL didn't carry any.
-(function bootstrapPrefs() {
-  try {
-    if (window.location.search) return;  // URL takes precedence
-    const p = _loadPrefs();
-    if (Array.isArray(p.models) && p.models.length) {
-      selectedModels = new Set(p.models);
-    }
-  } catch (e) {}
-})();
-
-loadData();
+    await loadData();
   } catch(e) {
     btn.textContent = '\u21bb Rescan (error)';
     console.error(e);
@@ -2100,6 +2087,17 @@ function scheduleAutoRefresh() {
     autoRefreshTimer = setInterval(loadData, 30000);
   }
 }
+
+// Apply localStorage prefs at startup if URL didn't carry any.
+(function bootstrapPrefs() {
+  try {
+    if (window.location.search) return;  // URL takes precedence
+    const p = _loadPrefs();
+    if (Array.isArray(p.models) && p.models.length) {
+      selectedModels = new Set(p.models);
+    }
+  } catch (e) {}
+})();
 
 loadData(); _populateThemeDropdown();
 scheduleAutoRefresh();
