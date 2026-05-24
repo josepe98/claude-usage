@@ -3971,7 +3971,8 @@ function applyFilter() {
   renderTimeOnTask();
   renderBranchOnlyCostTable(lastByBranch.slice(0, 20));
   renderCache1hOpportunities(rawData.cache_1h_opportunities || []);
-  renderPlanLimits();
+  // renderPlanLimits() removed: auto-detect from 30d high-water marks doesn't
+  // match Anthropic's real plan cap (off by ~2x). Backend kept dormant.
 
   const visibleSessions = lastFilteredSessions.slice(0, 20);
   if (!visibleSessions.length) {
