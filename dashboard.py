@@ -3246,7 +3246,7 @@ function fmt(n) {
   return n.toLocaleString();
 }
 // ── Currency / FX (USD-based; rates come from /api/fx-rates) ──────────────
-const FX_LS_KEY            = 'fx_rates';
+const FX_LS_KEY            = 'fx_rates_v2';  // v2 = open.er-api.com (~170), bump invalidates stale frankfurter (~30) caches
 const FX_CURRENCY_LS_KEY   = 'fx_currency';
 const FX_CLIENT_TTL_MS     = 24 * 60 * 60 * 1000;  // 24h
 const CURRENCY_SYMBOLS = {
@@ -3473,6 +3473,8 @@ function fmtCost(c)    { return fmtCostCurrency(c, 4); }
 function fmtCostBig(c) { return fmtCostCurrency(c, 2); }
 
 async function _loadFxRates() {
+  // Clean up old v1 cache key from before the open.er-api.com switch.
+  try { localStorage.removeItem('fx_rates'); } catch (e) {}
   // Try localStorage cache first.
   try {
     const raw = localStorage.getItem(FX_LS_KEY);
