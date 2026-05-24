@@ -4342,13 +4342,13 @@ function _f() { return (rawData && rawData.forecast) || null; }
 function forecastValue() {
   const f = _f();
   if (!f || !f.days_in_data) return 'n/a';
-  return '$' + (f.projected_month_end || 0).toFixed(2);
+  return fmtCostBig(f.projected_month_end || 0);
 }
 function forecastSub() {
   const f = _f();
   if (!f || !f.days_in_data) return 'no spend data yet';
   const arrow = f.trend === 'up' ? '\u2191' : f.trend === 'down' ? '\u2193' : '\u2192';
-  return arrow + ' $' + f.avg_7d.toFixed(2) + '/day (7d) \u2022 ' + f.days_left_in_month + 'd left in month';
+  return arrow + ' ' + fmtCostBig(f.avg_7d) + '/day (7d) \u2022 ' + f.days_left_in_month + 'd left in month';
 }
 function forecastColor() {
   const f = _f();
