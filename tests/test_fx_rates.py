@@ -20,6 +20,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import dashboard
 
 
+# Primary provider (open.er-api.com) sample response. Covers ~166 currencies in
+# production; we use a minimal subset for tests.
+OPEN_ER_API_SAMPLE = {
+    "result": "success",
+    "provider": "https://www.exchangerate-api.com",
+    "base_code": "USD",
+    "time_last_update_utc": "Sat, 23 May 2026 00:02:32 +0000",
+    "rates": {
+        "USD": 1.0, "EUR": 0.92, "CZK": 23.4, "GBP": 0.79, "JPY": 156.2,
+        "AED": 3.673, "ZWL": 25.97,
+    },
+}
+
+# Fallback provider (frankfurter.app) sample response.
 FRANKFURTER_SAMPLE = {
     "amount": 1.0,
     "base": "USD",
@@ -40,6 +54,26 @@ def _mock_urlopen_returning(payload):
     return mock.Mock(return_value=_Resp())
 
 
+def _mock_urlopen_fallback(primary_exc, fallback_payload):
+    """Return a mock that raises primary_exc on first call, succeeds on second."""
+    body = json.dumps(fallback_payload).encode("utf-8")
+
+    class _Resp:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return body
+
+    calls = {"n": 0}
+
+    def _open(*a, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise primary_exc
+        return _Resp()
+
+    return mock.MagicMock(side_effect=_open)
+
+
 def _reset_fx_cache():
     dashboard._FX_CACHE["data"] = None
     dashboard._FX_CACHE["fetched_at"] = 0.0
@@ -53,24 +87,41 @@ class TestFetchFxRates(unittest.TestCase):
         _reset_fx_cache()
 
     def test_fetch_fx_returns_none_on_network_error(self):
+        # Both primary and fallback providers fail -> None.
         with mock.patch("dashboard._fx_urlopen",
                         side_effect=urllib.error.URLError("boom")):
             self.assertIsNone(dashboard._fetch_fx_rates())
 
     def test_fetch_fx_returns_parsed_dict_on_success(self):
         with mock.patch("dashboard._fx_urlopen",
-                        _mock_urlopen_returning(FRANKFURTER_SAMPLE)):
+                        _mock_urlopen_returning(OPEN_ER_API_SAMPLE)):
             out = dashboard._fetch_fx_rates()
         self.assertIsNotNone(out)
         self.assertEqual(out["base"], "USD")
-        self.assertEqual(out["date"], "2026-05-23")
+        self.assertEqual(out["source"], "open.er-api.com")
         self.assertIn("as_of", out)
         self.assertEqual(out["rates"]["EUR"], 0.92)
+        self.assertEqual(out["rates"]["AED"], 3.673)
         # Base currency is normalised to 1.0 in the rates dict.
         self.assertEqual(out["rates"]["USD"], 1.0)
 
+    def test_fetch_fx_falls_back_to_frankfurter_on_primary_error(self):
+        # Primary (open.er-api.com) fails; fallback (frankfurter.app) succeeds.
+        mock_open = _mock_urlopen_fallback(
+            urllib.error.URLError("primary down"),
+            FRANKFURTER_SAMPLE,
+        )
+        with mock.patch("dashboard._fx_urlopen", mock_open):
+            out = dashboard._fetch_fx_rates()
+        self.assertIsNotNone(out)
+        self.assertEqual(out["source"], "frankfurter.app")
+        self.assertEqual(out["date"], "2026-05-23")
+        self.assertEqual(out["rates"]["EUR"], 0.92)
+        self.assertEqual(out["rates"]["USD"], 1.0)
+        self.assertEqual(mock_open.call_count, 2)
+
     def test_fetch_fx_uses_cache_when_fresh(self):
-        mock_open = _mock_urlopen_returning(FRANKFURTER_SAMPLE)
+        mock_open = _mock_urlopen_returning(OPEN_ER_API_SAMPLE)
         with mock.patch("dashboard._fx_urlopen", mock_open):
             a = dashboard._fetch_fx_rates()
             b = dashboard._fetch_fx_rates()
@@ -78,7 +129,7 @@ class TestFetchFxRates(unittest.TestCase):
         self.assertIs(a, b)
 
     def test_fetch_fx_refreshes_when_stale(self):
-        mock_open = _mock_urlopen_returning(FRANKFURTER_SAMPLE)
+        mock_open = _mock_urlopen_returning(OPEN_ER_API_SAMPLE)
         real_time = time.time
         with mock.patch("dashboard._fx_urlopen", mock_open):
             with mock.patch("dashboard.time.time", side_effect=[1000.0, 1000.0]):
@@ -91,7 +142,7 @@ class TestFetchFxRates(unittest.TestCase):
 
     def test_fetch_fx_respects_target_currencies_filter(self):
         with mock.patch("dashboard._fx_urlopen",
-                        _mock_urlopen_returning(FRANKFURTER_SAMPLE)):
+                        _mock_urlopen_returning(OPEN_ER_API_SAMPLE)):
             out = dashboard._fetch_fx_rates(target_currencies=["EUR", "CZK"])
         self.assertEqual(set(out["rates"].keys()), {"EUR", "CZK", "USD"})
 
@@ -123,7 +174,7 @@ class TestFxRatesEndpoint(unittest.TestCase):
 
     def test_api_endpoint_returns_rates(self):
         with mock.patch("dashboard._fx_urlopen",
-                        _mock_urlopen_returning(FRANKFURTER_SAMPLE)):
+                        _mock_urlopen_returning(OPEN_ER_API_SAMPLE)):
             with urllib.request.urlopen(
                 "http://127.0.0.1:%d/api/fx-rates" % self.PORT
             ) as r:
@@ -132,6 +183,10 @@ class TestFxRatesEndpoint(unittest.TestCase):
         self.assertIn("rates", d)
         self.assertEqual(d["rates"]["EUR"], 0.92)
         self.assertEqual(d["rates"]["USD"], 1.0)
+        self.assertEqual(d["source"], "open.er-api.com")
+        # The primary provider gives ~160+ currencies in production. Our test
+        # sample is a subset, but the API endpoint preserves whatever it received.
+        self.assertGreaterEqual(len(d["rates"]), 5)
         self.assertIn("as_of", d)
 
     def test_api_endpoint_returns_fallback_on_fetch_failure(self):
