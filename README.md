@@ -35,6 +35,83 @@ Captures usage from:
 
 ---
 
+## Recent additions (May 2026)
+
+Major batch of features added to this fork — all are opt-in or autodetect, none require config.
+
+### Cost insights & forecasting
+- **Period delta badges** — each KPI card shows ±% vs same-length previous window.
+- **Burn-rate forecast** — projected month-end cost based on 7-day moving avg, with up/down/flat trend.
+- **Cost concentration (Pareto)** — banner highlighting what % of spend comes from the top-5 sessions.
+- **Spend-spike anomaly banner** — flags days where today's spend is ≥3× the 30-day mean.
+- **Model downgrade suggestions** — analyzes Opus/Sonnet sessions that likely could have used Haiku, surfaces potential savings.
+- **Plan tier comparison** — at your current burn rate, which Anthropic plan (Free / Pro / Max-5x / Max-20x) is cheapest? Updates monthly.
+- **Cache hit ratio analyzer** — overall cache effectiveness + flags sessions underusing the prompt cache.
+- **1h cache opportunity hints** — detects spend patterns that would benefit from switching from 5m to 1h cache tier.
+
+### Visualizations
+- **Year calendar heatmap** — GitHub-style 53×7 contribution grid showing trailing 365 days; click a day to drill in.
+- **Day-of-Week × Hour activity heatmap** — when during the week you actually code; click a cell to filter sessions.
+- **Top Tools by Turns** — bar chart breaking down which tools (Read, Bash, Edit, …) consume the most turns.
+- **Cost-per-turn distribution histogram** — p50/p95/p99 of session cost.
+- **Per-session sparkline** — inline 60×14 SVG turn-rate timeline next to each session row.
+- **A/B compare mode** — overlay two time periods (e.g. "30d" vs "7d") side-by-side across every chart and table.
+
+### Live monitoring
+- **Live active-session widget** — real-time indicator + auto-refresh tightens to 10s when a session is active.
+- **Time-on-task tracking** — active coding minutes today + 30d average (intra-session gaps < 5 min count as active).
+- **Streak counter** — consecutive days of activity, GitHub-style.
+
+### Sessions UI
+- **Search / filter sessions** — type to filter the Recent Sessions table by project, branch, session id, model.
+- **Session drill-down panel** — click a row for branch, tool, cwd, and full turn history.
+- **Session annotations / tags** — persisted to `~/.claude/tags.json`, no server needed.
+- **Subagent vs main-thread split** — separates costs of nested subagent calls from the parent session.
+
+### Budgets & alerts
+- **Monthly budget watchdog** — colored bar with edit-in-place, green / amber / red at 0-80 / 80-100 / 100%+.
+- **Per-project budgets** — separate cap per project, persisted to `~/.claude/project-budgets.json`.
+- **Custom alert webhooks** — fire user-defined HTTP webhooks on budget breach, spike, or threshold events.
+
+### Multi-* support
+- **Multi-account tracking** — separates usage by Anthropic account when multiple are signed in.
+- **Multi-machine aggregation (workspace / team mode)** — when scanning a shared DB across multiple machines, per-machine rollup.
+- **PII / sensitive-content scanner** — soft warning flag on sessions whose project / branch names contain configurable patterns.
+
+### Data export & integrations
+- **JSON / CSV export endpoints** — `/api/export.{json,csv}` plus `cli.py export` command.
+- **Markdown report generator** — `cli.py report` produces a copy-pasteable summary.
+- **Markdown copy buttons** — every table has a 📋 MD button to copy as markdown.
+- **AppleScript text endpoints** — `/api/text/today` etc. return plain-text strings consumable by Shortcuts / Stream Deck / Alfred.
+- **CLI tab completion** — `cli.py completion install` adds bash / zsh / fish completions.
+- **Git post-commit hook** — optional hook that tags commits with the session that produced them.
+- **VS Code statusbar extension** — companion extension showing today's spend in the status bar.
+- **Menu-bar / tray app** — `cli.py tray` shows current cost + status icon.
+- **Inbound webhook receiver** — `/api/inbound` accepts events from external sources (CI, GitHub, etc.) for annotation.
+- **Project rename UI** — collapse `/Users/me/dev/foo` and `~/dev/foo` into one display name.
+- **Workbench export integration** — for users running the optional Workbench desktop app.
+
+### UI customization
+- **Dashboard customize mode** — drag-to-reorder + per-block hide; prefs persisted to `~/.claude/dashboard_prefs.json` and follow you across browsers/devices.
+- **Currency selector** — searchable combobox over ~170 ISO 4217 currencies (rates from [open.er-api.com](https://open.er-api.com), no key, cached 6h). Every cost in the dashboard re-renders live.
+- **Theme quick-switch dropdown** — header-level theme picker without opening the `/themes` gallery.
+- **Keyboard shortcuts** — `/` focus search, `r` rescan, `t` toggle hourly TZ, `?` help.
+- **Mobile responsive pass** — single-column layout under 768px width.
+- **Persisted preferences** — selected models, range, sort orders, TZ, theme, and currency all survive reload via localStorage.
+- **Reset prefs button** — one-click clear of all client-side preferences.
+
+### Infrastructure
+- **PWA installable** — add to home screen on iOS, "Install app" on Chrome / Edge.
+- **Share-link read-only mode** — generate a one-shot URL that exposes only `/api/data` (no admin).
+- **`/api/health` endpoint** — JSON status for liveness checks (sessions count, turns, db path).
+- **Reset DB button** — wipe `~/.claude/usage.db` from the UI when data looks wrong.
+- **ThreadingHTTPServer** — concurrent request handling so slow data loads no longer freeze the dashboard.
+- **Bookmarkable URLs work** — `?range=30d` no longer 404s.
+- **Cache tier accuracy** — proper 5m vs 1h cache tier pricing rather than a flat estimate.
+- **Cowork audit log support** — multiplatform; also reads `~/Library/Application Support/Claude/local-agent-mode-sessions/` so Claude Desktop's Cowork sessions show up alongside CLI usage.
+
+---
+
 ## Requirements
 
 - Python 3.8+
