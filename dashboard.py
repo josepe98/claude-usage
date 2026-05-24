@@ -1229,9 +1229,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 </div>
 
 <div class="container">
-  <div class="stats-row" id="stats-row" data-block-id="stats-row"></div>
     <div id="pareto-card" data-block-id="pareto-card" style="display:none; margin: -8px 0 16px 0; padding: 10px 14px; background: rgba(217,119,87,0.08); border-radius: 8px; font-size: 12px; color: var(--text);"></div>
     <div id="plan-card" data-block-id="plan-card" style="display:none; margin:0 0 16px 0; padding:10px 14px; background:rgba(74,222,128,0.08); border-radius:8px; font-size:12px; color:var(--text);"></div>
+  <div class="stats-row" id="stats-row" data-block-id="stats-row"></div>
   <div class="charts-grid" data-block-id="charts-grid-main">
     <div class="chart-card wide">
       <h2 id="daily-chart-title">Daily Token Usage</h2>
