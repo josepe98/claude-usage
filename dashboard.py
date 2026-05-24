@@ -2569,7 +2569,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .container { max-width: 1200px; margin: 0 auto; padding: 32px 24px; }
   .stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 16px; margin-bottom: 24px; }
   /* Plan utilization (5h + weekly) */
-  .plan-limits-card { background: var(--card); border-radius: var(--card-radius); border: var(--card-border); padding: 20px; margin-bottom: 24px; box-shadow: var(--shadow); }
+  .plan-limits-card { background: var(--card); border-radius: var(--card-radius); border: var(--card-border); padding: 20px; margin-bottom: 24px; box-shadow: var(--shadow); display: none !important; }
   .pl-header { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 16px; gap: 12px; flex-wrap: wrap; }
   .pl-header h2 { font-size: 15px; font-weight: 600; letter-spacing: -0.24px; color: var(--text); margin: 0; }
   .pl-note { color: var(--muted); font-size: 11px; }
@@ -5631,7 +5631,7 @@ async function loadData() {
 
     renderGitTraceCard(d.git_trace_recent || []);
     applyFilter();
-    renderPlanLimits();
+    // renderPlanLimits() removed (see comment in shared renderers block)
   } catch(e) {
     console.error(e);
   }
