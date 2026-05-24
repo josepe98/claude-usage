@@ -793,7 +793,6 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <button class="link-btn" onclick="_resetPrefs()" title="Clear saved range / model / theme preferences and reload">Reset prefs</button>
       <button id="rescan-btn" onclick="triggerRescan()" title="Rebuild the database from scratch by re-scanning all JSONL files. Use if data looks stale or costs seem wrong.">&#x21bb; Rescan</button>
     <button class="appearance-btn" onclick="window.open('/themes','_blank')">Appearance</button>
-    <button id="rescan-btn" onclick="triggerRescan()" title="Rebuild the database from scratch by re-scanning all JSONL files. Use if data looks stale or costs seem wrong.">&#x21bb; Rescan</button>
     <select id="theme-quick" onchange="_onThemeQuickChange(this.value)" title="Quick-switch theme" style="background: var(--card); border: 1px solid var(--border); border-radius: 6px; color: var(--text); padding: 4px 8px; font-size: 12px; margin-right: 6px;"></select>
       <button class="appearance-btn" onclick="window.open('/themes','_blank')">Appearance</button>
   </div>
