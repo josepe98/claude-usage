@@ -2704,7 +2704,7 @@ function startLivePolling() {
   _liveTimer = setInterval(tick, 10000);  // probe every 10s — cheap
 }
 
-function loadData() {
+async function loadData() {
   try {
     const resp = await fetch('/api/data');
     const d = await resp.json();
