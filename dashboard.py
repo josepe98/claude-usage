@@ -2673,7 +2673,6 @@ document.addEventListener('keydown', (e) => {
 });
 
 // ── Data loading ───────────────────────────────────────────────────────────
-async 
 let _liveTimer = null;
 function startLivePolling() {
   function tick() {
@@ -2784,6 +2783,7 @@ if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("/sw.js", { scope: "/" }).catch(function () {});
   });
 }
+startLivePolling();
 </script>
 </body>
 </html>
@@ -2872,7 +2872,7 @@ def _active_sessions(window_seconds=300, projects_dirs=None,
     rows = conn.execute(f"""
         SELECT session_id, project_name, model, turn_count,
                total_input_tokens, total_output_tokens,
-               total_cache_read, total_cache_creation, last_timestamp
+               total_cache_read, total_cache_creation, total_cache_1h, last_timestamp
         FROM sessions
         WHERE session_id IN ({placeholders})
            OR substr(session_id, 1, 36) IN ({placeholders})
@@ -2905,6 +2905,7 @@ def _active_sessions(window_seconds=300, projects_dirs=None,
                 s.get("total_output_tokens", 0),
                 s.get("total_cache_read", 0),
                 s.get("total_cache_creation", 0),
+                s.get("total_cache_1h", 0),
             )
         out.append({
             "session_id":   sid[:8],
