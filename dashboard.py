@@ -1983,9 +1983,10 @@ function renderSessionsTable(sessions) {
     const costCell = isBillable(s.model)
       ? `<td class="cost">${fmtCost(cost)}</td>`
       : `<td class="cost-na">n/a</td>`;
+    const tagLink = ` <a href="#" onclick="event.stopPropagation(); _promptTags('${esc(s.session_id)}'); return false;" style="font-size:10px;color:var(--muted);text-decoration:none;">tag</a>${_renderTags(s)}`;
     const sessionCell = s.session_name
-      ? `<td><span class="session-name">${esc(s.session_name)}</span> <span class="muted" style="font-family:monospace">(${esc(s.session_id)}&hellip;)</span></td>`
-      : `<td class="muted" style="font-family:monospace">${esc(s.session_id)}&hellip;</td>`;
+      ? `<td><span class="session-name">${esc(s.session_name)}</span> <span class="muted" style="font-family:monospace">(${esc(s.session_id)}&hellip;)</span>${tagLink}</td>`
+      : `<td class="muted" style="font-family:monospace">${esc(s.session_id)}&hellip;${tagLink}</td>`;
     return `<tr class="session-row ${selectedSessionId === s.session_id_full ? 'selected' : ''}" data-session-id="${esc(s.session_id_full)}">
       ${sessionCell}
       <td>${esc(s.project)}</td>
