@@ -261,6 +261,73 @@ def read_inbound_events(limit=100):
     return out
 
 
+DASHBOARD_PREFS_PATH = Path.home() / ".claude" / "dashboard_prefs.json"
+
+# Canonical set of top-level dashboard block IDs.  Used by validation so a
+# malicious or stale client can't smuggle arbitrary strings into the
+# server-side prefs file.  Keep this in sync with the data-block-id values
+# in HTML_TEMPLATE.  Mega-merge adds many sections beyond the PR's original
+# eight; they're all enumerated here so the validator accepts the full set.
+DASHBOARD_BLOCK_IDS = frozenset({
+    "stats-row",
+    "plan-limits-card",
+    "pareto-card",
+    "budget-bar",
+    "anomaly-banner",
+    "plan-card",
+    "downgrade-card",
+    "cache-hit-card",
+    "git-trace-card",
+    "inbound-card",
+    "time-on-task-card",
+    "charts-grid-main",
+    "charts-grid-tools",
+    "cost-by-model-table",
+    "recent-sessions-table",
+    "session-detail-card",
+    "cost-by-project-table",
+    "cost-by-project-branch-table",
+    "cost-by-branch-card",
+})
+
+
+def _load_dashboard_prefs(path=None):
+    """Read dashboard prefs JSON.  Returns {} when the file is missing or
+    unreadable so callers can rely on a dict shape."""
+    p = Path(path) if path is not None else DASHBOARD_PREFS_PATH
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text() or "{}")
+    except Exception:
+        return {}
+
+
+def _save_dashboard_prefs(prefs, path=None):
+    """Persist prefs as pretty-printed JSON.  Creates parent dirs as needed."""
+    p = Path(path) if path is not None else DASHBOARD_PREFS_PATH
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(prefs, indent=2, sort_keys=True))
+
+
+def _validate_dashboard_prefs(body):
+    """Validate prefs payload.  Returns (ok, error_or_normalized)."""
+    if not isinstance(body, dict):
+        return False, "prefs must be a JSON object"
+    order = body.get("order", [])
+    hidden = body.get("hidden", [])
+    if not isinstance(order, list) or not all(isinstance(x, str) for x in order):
+        return False, "order must be a list of strings"
+    if not isinstance(hidden, list) or not all(isinstance(x, str) for x in hidden):
+        return False, "hidden must be a list of strings"
+    for bid in order:
+        if bid not in DASHBOARD_BLOCK_IDS:
+            return False, "unknown block id in order: " + bid
+    for bid in hidden:
+        if bid not in DASHBOARD_BLOCK_IDS:
+            return False, "unknown block id in hidden: " + bid
+    return True, {"order": order, "hidden": hidden}
+
 # ── Bundled themes ─────────────────────────────────────────────────────────────
 BUNDLED_THEMES = [
     {
@@ -2598,6 +2665,28 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     .table-card td.hide-mobile { display: none; }
     .chart-wrap { height: 240px; }
   }
+  /* ── Dashboard customization (edit mode) ─────────────────────────────── */
+  .appearance-btn.editing { background: var(--accent); color: #ffffff; border-color: var(--accent); }
+  body.edit-mode [data-block-id] { position: relative; outline: 2px dashed var(--accent); outline-offset: 4px; transition: opacity 0.15s; }
+  body.edit-mode [data-block-id].dragging { opacity: 0.4; }
+  body.edit-mode [data-block-id].drop-target { outline-color: var(--green); outline-style: solid; }
+  .block-edit-overlay { display: none; }
+  body.edit-mode .block-edit-overlay { display: flex; position: absolute; top: -14px; left: 0; right: 0; height: 24px; align-items: center; justify-content: space-between; padding: 0 6px; pointer-events: none; z-index: 5; }
+  body.edit-mode .block-edit-overlay > * { pointer-events: auto; }
+  .block-drag-handle { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; background: var(--card); border: 1px solid var(--border); border-radius: 4px; color: var(--muted); cursor: grab; font-size: 14px; line-height: 1; user-select: none; box-shadow: var(--shadow); }
+  .block-drag-handle:active { cursor: grabbing; }
+  .block-hide-label { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text); background: var(--card); border: 1px solid var(--border); border-radius: 4px; padding: 2px 8px; cursor: pointer; box-shadow: var(--shadow); user-select: none; }
+  .block-hide-label input { margin: 0; cursor: pointer; }
+  /* In edit mode, hidden blocks stay visible (faded) so the user can unhide them. */
+  body.edit-mode [data-block-id].block-hidden { opacity: 0.4; }
+  body.edit-mode [data-block-id].block-hidden::after { content: "Hidden"; position: absolute; top: 4px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.6); color: #fff; font-size: 10px; padding: 2px 8px; border-radius: 4px; pointer-events: none; }
+  /* Outside edit mode: actually hide blocks the user has hidden. */
+  body:not(.edit-mode) [data-block-id].block-hidden { display: none !important; }
+  #edit-mode-toolbar { display: none; position: sticky; top: 48px; z-index: 90; background: rgba(255,159,10,0.10); border-bottom: 1px solid var(--border); padding: 8px 24px; align-items: center; gap: 12px; font-size: 12px; color: var(--text); }
+  body.edit-mode #edit-mode-toolbar { display: flex; }
+  #edit-mode-toolbar .toolbar-hint { color: var(--muted); flex: 1; }
+  #edit-mode-toolbar button { background: var(--card); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 4px 12px; cursor: pointer; font-size: 12px; }
+  #edit-mode-toolbar button:hover { border-color: var(--accent); color: var(--accent); }
 </style>
 </head>
 <body>
@@ -2622,8 +2711,15 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <button id="rescan-btn" onclick="triggerRescan()" title="Rebuild the database from scratch by re-scanning all JSONL files. Use if data looks stale or costs seem wrong.">&#x21bb; Rescan</button>
     <select id="theme-quick" onchange="_onThemeQuickChange(this.value)" title="Quick-switch theme" style="background: var(--card); border: 1px solid var(--border); border-radius: 6px; color: var(--text); padding: 4px 8px; font-size: 12px; margin-right: 6px;"></select>
       <button class="appearance-btn" onclick="window.open('/themes','_blank')">Appearance</button>
+      <button class="appearance-btn" id="customize-btn" onclick="toggleEditMode()" title="Rearrange or hide dashboard sections">Customize</button>
   </div>
 </header>
+
+<div id="edit-mode-toolbar">
+  <span class="toolbar-hint">Edit mode · drag the ⋮ handles to reorder, check Hide to remove a section. Changes save automatically when you exit.</span>
+  <button onclick="resetDashboardPrefs()" title="Restore the default order and unhide everything">Reset to defaults</button>
+  <button onclick="toggleEditMode()">Done</button>
+</div>
 
 <div id="filter-bar">
   <div id="machine-filter-wrap" data-machine-filter style="display:none; align-items:center; gap:10px;">
@@ -2684,8 +2780,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 </div>
 
 <div class="container">
-  <div class="stats-row" id="stats-row"></div>
-  <div class="plan-limits-card" id="plan-limits-card" style="display:none;">
+  <div class="stats-row" id="stats-row" data-block-id="stats-row"></div>
+  <div class="plan-limits-card" id="plan-limits-card" data-block-id="plan-limits-card" style="display:none;">
     <div class="pl-header">
       <h2>Plan Utilization</h2>
       <span class="pl-note" id="pl-note"></span>
@@ -2703,16 +2799,15 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     </div>
   </div>
 
-    <div id="pareto-card" style="display:none; margin: -8px 0 16px 0; padding: 10px 14px; background: rgba(217,119,87,0.08); border-radius: 8px; font-size: 12px; color: var(--text);"></div>
-  <div id="budget-bar" style="display:none; margin:0 0 16px 0;"><div style="display:flex; justify-content:space-between; align-items:baseline; margin-bottom:6px;"><div style="font-size:12px; color:var(--muted);">Monthly budget <span id="budget-label"></span></div><div style="font-size:11px; color:var(--muted);"><a href="#" onclick="_editBudget(); return false;" style="color:var(--muted); text-decoration:underline;">edit</a></div></div><div id="budget-track" style="height:6px; background:rgba(255,255,255,0.08); border-radius:3px; overflow:hidden;"><div id="budget-fill" style="height:100%; background:#4ade80; transition: width 0.3s, background-color 0.3s;"></div></div></div>
-  <div id="anomaly-banner" style="display:none; padding:10px 14px; margin: 0 0 12px 0; background:rgba(248,113,113,0.12); border-left:3px solid #f87171; border-radius:6px; color:#f87171; font-size:13px;"></div>
-    <div class="stats-row" id="stats-row"></div>
-    <div id="plan-card" style="display:none; margin:0 0 16px 0; padding:10px 14px; background:rgba(74,222,128,0.08); border-radius:8px; font-size:12px; color:var(--text);"></div>
-    <div id="downgrade-card" style="display:none; margin: -8px 0 16px 0; padding: 10px 14px; background: rgba(74,222,128,0.10); border-radius: 8px; font-size: 12px; color: var(--text);"></div>
-    <div id="cache-hit-card" style="display:none; margin: -4px 0 16px 0; padding: 10px 14px; background: rgba(94,106,210,0.08); border-radius: 8px; font-size: 12px; color: var(--text);"></div>
-    <div id="git-trace-card" style="display:none; margin: -8px 0 16px 0; padding: 12px 16px; background: rgba(76,175,80,0.08); border: 1px solid rgba(76,175,80,0.18); border-radius: 8px; font-size: 13px; color: var(--text);"></div>
-    <details id="inbound-card" style="display:none; margin: -8px 0 16px 0; padding: 10px 14px; background: rgba(94,106,210,0.08); border-radius: 8px; font-size: 12px; color: var(--text);"><summary style="cursor:pointer; user-select:none;"><strong>Recent inbound events</strong> <span id="inbound-count" style="color:var(--muted);"></span></summary><div id="inbound-list" style="margin-top:8px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; line-height: 1.6;"></div></details>
-    <div class="chart-card" id="time-on-task-card" style="margin-bottom: 16px;">
+    <div id="pareto-card" data-block-id="pareto-card" style="display:none; margin: -8px 0 16px 0; padding: 10px 14px; background: rgba(217,119,87,0.08); border-radius: 8px; font-size: 12px; color: var(--text);"></div>
+  <div id="budget-bar" data-block-id="budget-bar" style="display:none; margin:0 0 16px 0;"><div style="display:flex; justify-content:space-between; align-items:baseline; margin-bottom:6px;"><div style="font-size:12px; color:var(--muted);">Monthly budget <span id="budget-label"></span></div><div style="font-size:11px; color:var(--muted);"><a href="#" onclick="_editBudget(); return false;" style="color:var(--muted); text-decoration:underline;">edit</a></div></div><div id="budget-track" style="height:6px; background:rgba(255,255,255,0.08); border-radius:3px; overflow:hidden;"><div id="budget-fill" style="height:100%; background:#4ade80; transition: width 0.3s, background-color 0.3s;"></div></div></div>
+  <div id="anomaly-banner" data-block-id="anomaly-banner" style="display:none; padding:10px 14px; margin: 0 0 12px 0; background:rgba(248,113,113,0.12); border-left:3px solid #f87171; border-radius:6px; color:#f87171; font-size:13px;"></div>
+    <div id="plan-card" data-block-id="plan-card" style="display:none; margin:0 0 16px 0; padding:10px 14px; background:rgba(74,222,128,0.08); border-radius:8px; font-size:12px; color:var(--text);"></div>
+    <div id="downgrade-card" data-block-id="downgrade-card" style="display:none; margin: -8px 0 16px 0; padding: 10px 14px; background: rgba(74,222,128,0.10); border-radius: 8px; font-size: 12px; color: var(--text);"></div>
+    <div id="cache-hit-card" data-block-id="cache-hit-card" style="display:none; margin: -4px 0 16px 0; padding: 10px 14px; background: rgba(94,106,210,0.08); border-radius: 8px; font-size: 12px; color: var(--text);"></div>
+    <div id="git-trace-card" data-block-id="git-trace-card" style="display:none; margin: -8px 0 16px 0; padding: 12px 16px; background: rgba(76,175,80,0.08); border: 1px solid rgba(76,175,80,0.18); border-radius: 8px; font-size: 13px; color: var(--text);"></div>
+    <details id="inbound-card" data-block-id="inbound-card" style="display:none; margin: -8px 0 16px 0; padding: 10px 14px; background: rgba(94,106,210,0.08); border-radius: 8px; font-size: 12px; color: var(--text);"><summary style="cursor:pointer; user-select:none;"><strong>Recent inbound events</strong> <span id="inbound-count" style="color:var(--muted);"></span></summary><div id="inbound-list" style="margin-top:8px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; line-height: 1.6;"></div></details>
+    <div class="chart-card" id="time-on-task-card" data-block-id="time-on-task-card" style="margin-bottom: 16px;">
       <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:16px; flex-wrap:wrap;">
         <div>
           <h2 style="margin-bottom:4px;">Time on Task</h2>
@@ -2737,7 +2832,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         </div>
       </div>
     </div>
-  <div class="charts-grid">
+  <div class="charts-grid" data-block-id="charts-grid-main">
     <div class="chart-card wide">
       <h2 id="daily-chart-title">Daily Token Usage</h2>
       <div class="chart-wrap tall"><canvas id="chart-daily"></canvas></div>
@@ -2795,14 +2890,14 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     </div>
   </div>
 
-  <div class="charts-grid" style="grid-template-columns: 1fr;">
+  <div class="charts-grid" data-block-id="charts-grid-tools" style="grid-template-columns: 1fr;">
     <div class="chart-card">
       <h2>Top Tools by Turns</h2>
       <div id="tools-chart-empty" style="display:none; color:var(--muted); padding:24px 0; text-align:center;">No tool_name data yet — older transcripts may not have tool info.</div>
       <div class="chart-wrap"><canvas id="chart-tools"></canvas></div>
     </div>
   </div>
-  <div class="table-card">
+  <div class="table-card" data-block-id="cost-by-model-table">
     <div class="section-header"><div class="section-title">Cost by Model</div><div class="section-actions"><button class="md-btn" onclick="copyModelMD()" title="Copy table as markdown">&#x1f4cb; MD</button></div></div>
     <table id="model-cost-table">
       <thead><tr>
@@ -2817,7 +2912,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <tbody id="model-cost-body"></tbody>
     </table>
   </div>
-  <div class="table-card">
+  <div class="table-card" data-block-id="recent-sessions-table">
     <div class="section-header">
       <div class="section-title">Recent Sessions</div>
       <div class="section-actions">
@@ -2842,11 +2937,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <tbody id="sessions-body"></tbody>
     </table>
   </div>
-  <div class="table-card" id="session-detail-card" style="display:none;">
+  <div class="table-card" id="session-detail-card" data-block-id="session-detail-card" style="display:none;">
     <div class="section-title">Session Detail</div>
     <div id="session-detail"></div>
   </div>
-  <div class="table-card">
+  <div class="table-card" data-block-id="cost-by-project-table">
     <div class="section-header"><div class="section-title">Cost by Project</div><div class="section-actions"><button class="md-btn" onclick="copyProjectsMD()" title="Copy table as markdown">&#x1f4cb; MD</button><button class="export-btn" onclick="exportProjectsCSV()" title="Export all projects to CSV">&#x2913; CSV</button></div></div>
     <table id="project-cost-table">
       <thead><tr>
@@ -2860,7 +2955,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <tbody id="project-cost-body"></tbody>
     </table>
   </div>
-  <div class="table-card">
+  <div class="table-card" data-block-id="cost-by-project-branch-table">
     <div class="section-header"><div class="section-title">Cost by Project &amp; Branch</div><div class="section-actions"><button class="md-btn" onclick="copyProjectBranchMD()" title="Copy table as markdown">&#x1f4cb; MD</button><button class="export-btn" onclick="exportProjectBranchCSV()" title="Export project+branch breakdown to CSV">&#x2913; CSV</button></div></div>
     <table id="project-branch-cost-table">
       <thead><tr>
@@ -2875,7 +2970,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <tbody id="project-branch-cost-body"></tbody>
     </table>
   </div>
-  <div class="table-card" id="cost-by-branch-card">
+  <div class="table-card" id="cost-by-branch-card" data-block-id="cost-by-branch-card">
     <div class="section-header"><div class="section-title">Cost by Branch</div><button class="export-btn" onclick="exportBranchCSV()" title="Export branch breakdown to CSV">&#x2913; CSV</button></div>
     <table>
       <thead><tr>
@@ -5455,6 +5550,172 @@ if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("/sw.js", { scope: "/" }).catch(function () {});
   });
 }
+
+// ── Dashboard customization (drag-reorder + per-block hide) ────────────────
+// Default canonical order — includes every section the mega-merge introduces
+// (plan-limits, budget bar, anomaly banner, plan/downgrade/cache cards, git
+// trace, inbound feed, time-on-task, tools chart, cost-by-branch table) so
+// "Reset to defaults" puts them back in a sensible position.
+const DASHBOARD_BLOCK_IDS = [
+  'stats-row', 'plan-limits-card', 'pareto-card', 'budget-bar', 'anomaly-banner',
+  'plan-card', 'downgrade-card', 'cache-hit-card', 'git-trace-card', 'inbound-card',
+  'time-on-task-card', 'charts-grid-main', 'charts-grid-tools',
+  'cost-by-model-table', 'recent-sessions-table', 'session-detail-card',
+  'cost-by-project-table', 'cost-by-project-branch-table', 'cost-by-branch-card',
+];
+let dashboardPrefs = { order: [], hidden: [] };
+let editMode = false;
+let dragSrcId = null;
+
+function _containerEl() { return document.querySelector('.container'); }
+
+function _allBlocks() {
+  return Array.from(_containerEl().querySelectorAll(':scope > [data-block-id]'));
+}
+
+function applyDashboardPrefs(prefs) {
+  dashboardPrefs = {
+    order:  Array.isArray(prefs && prefs.order)  ? prefs.order.slice()  : [],
+    hidden: Array.isArray(prefs && prefs.hidden) ? prefs.hidden.slice() : [],
+  };
+  const container = _containerEl();
+  if (!container) return;
+  // Reorder: known IDs first in prefs.order, then any new blocks the user
+  // hasn't seen yet (keeps forward compat when we add new sections).
+  if (dashboardPrefs.order.length) {
+    const blocksById = {};
+    _allBlocks().forEach(b => { blocksById[b.dataset.blockId] = b; });
+    const seen = new Set();
+    dashboardPrefs.order.forEach(id => {
+      if (blocksById[id]) { container.appendChild(blocksById[id]); seen.add(id); }
+    });
+    // Append unseen blocks at the end in their current DOM order.
+    Object.keys(blocksById).forEach(id => {
+      if (!seen.has(id)) container.appendChild(blocksById[id]);
+    });
+  }
+  const hidden = new Set(dashboardPrefs.hidden);
+  _allBlocks().forEach(b => {
+    b.classList.toggle('block-hidden', hidden.has(b.dataset.blockId));
+  });
+}
+
+async function fetchDashboardPrefs() {
+  try {
+    const r = await fetch('/api/dashboard-prefs');
+    const p = await r.json();
+    applyDashboardPrefs(p);
+  } catch (e) { console.warn('dashboard prefs fetch failed', e); }
+}
+
+async function saveDashboardPrefs() {
+  const order  = _allBlocks().map(b => b.dataset.blockId);
+  const hidden = _allBlocks().filter(b => b.classList.contains('block-hidden')).map(b => b.dataset.blockId);
+  dashboardPrefs = { order, hidden };
+  try {
+    await fetch('/api/dashboard-prefs', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ order, hidden }),
+    });
+  } catch (e) { console.warn('dashboard prefs save failed', e); }
+}
+
+function _ensureOverlays() {
+  _allBlocks().forEach(block => {
+    if (block.querySelector(':scope > .block-edit-overlay')) return;
+    const id = block.dataset.blockId;
+    const overlay = document.createElement('div');
+    overlay.className = 'block-edit-overlay';
+    overlay.innerHTML =
+      '<span class="block-drag-handle" title="Drag to reorder">⋮⋮</span>' +
+      '<label class="block-hide-label"><input type="checkbox" data-hide-for="' + id + '"> Hide</label>';
+    block.insertBefore(overlay, block.firstChild);
+    const cb = overlay.querySelector('input[type="checkbox"]');
+    cb.checked = block.classList.contains('block-hidden');
+    cb.addEventListener('change', () => {
+      block.classList.toggle('block-hidden', cb.checked);
+    });
+    // HTML5 drag-and-drop on the block itself, triggered from the handle.
+    const handle = overlay.querySelector('.block-drag-handle');
+    handle.addEventListener('mousedown', () => { block.setAttribute('draggable', 'true'); });
+    block.addEventListener('dragstart', (e) => {
+      dragSrcId = block.dataset.blockId;
+      block.classList.add('dragging');
+      try { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', dragSrcId); } catch(_) {}
+    });
+    block.addEventListener('dragend', () => {
+      block.classList.remove('dragging');
+      block.removeAttribute('draggable');
+      _allBlocks().forEach(b => b.classList.remove('drop-target'));
+      dragSrcId = null;
+    });
+    block.addEventListener('dragover', (e) => {
+      if (!editMode || dragSrcId === null || block.dataset.blockId === dragSrcId) return;
+      e.preventDefault();
+      try { e.dataTransfer.dropEffect = 'move'; } catch(_) {}
+      block.classList.add('drop-target');
+    });
+    block.addEventListener('dragleave', () => { block.classList.remove('drop-target'); });
+    block.addEventListener('drop', (e) => {
+      if (!editMode || dragSrcId === null) return;
+      e.preventDefault();
+      block.classList.remove('drop-target');
+      const src = document.querySelector('[data-block-id="' + dragSrcId + '"]');
+      if (!src || src === block) return;
+      const container = _containerEl();
+      const blocks = _allBlocks();
+      const srcIdx = blocks.indexOf(src);
+      const dstIdx = blocks.indexOf(block);
+      if (srcIdx < dstIdx) {
+        container.insertBefore(src, block.nextSibling);
+      } else {
+        container.insertBefore(src, block);
+      }
+    });
+  });
+}
+
+function toggleEditMode() {
+  editMode = !editMode;
+  document.body.classList.toggle('edit-mode', editMode);
+  const btn = document.getElementById('customize-btn');
+  if (btn) {
+    btn.textContent = editMode ? 'Done' : 'Customize';
+    btn.classList.toggle('editing', editMode);
+  }
+  if (editMode) {
+    _ensureOverlays();
+  } else {
+    saveDashboardPrefs();
+  }
+}
+
+async function resetDashboardPrefs() {
+  // Reset to the canonical default order and unhide everything.
+  const container = _containerEl();
+  const blocksById = {};
+  _allBlocks().forEach(b => { blocksById[b.dataset.blockId] = b; });
+  DASHBOARD_BLOCK_IDS.forEach(id => {
+    if (blocksById[id]) container.appendChild(blocksById[id]);
+  });
+  _allBlocks().forEach(b => b.classList.remove('block-hidden'));
+  // Sync overlay checkboxes if they're rendered.
+  document.querySelectorAll('.block-hide-label input[type="checkbox"]').forEach(cb => { cb.checked = false; });
+  try {
+    await fetch('/api/dashboard-prefs', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ order: [], hidden: [] }),
+    });
+  } catch (e) { console.warn('reset failed', e); }
+  dashboardPrefs = { order: [], hidden: [] };
+}
+
+// Apply server-side prefs as soon as the DOM is ready (before /api/data
+// returns) so the user doesn't see blocks rearrange under them.
+fetchDashboardPrefs();
+
 </script>
 </body>
 </html>
@@ -5796,6 +6057,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
 
+        elif path == "/api/dashboard-prefs":
+            prefs = _load_dashboard_prefs()
+            payload = {
+                "order":  prefs.get("order", [])  if isinstance(prefs.get("order"),  list) else [],
+                "hidden": prefs.get("hidden", []) if isinstance(prefs.get("hidden"), list) else [],
+            }
+            body = json.dumps(payload).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         elif self.path == "/themes":
             catalog_json = json.dumps(AWESOME_CATALOG)
             html = GALLERY_TEMPLATE.replace("__CATALOG_JSON__", catalog_json)
@@ -6083,6 +6357,36 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
 
             body = json.dumps({"ok": True, "received_at": record["received_at"]}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        elif path == "/api/dashboard-prefs":
+            length = int(self.headers.get("Content-Length", "0") or 0)
+            raw = self.rfile.read(length) if length > 0 else b""
+            try:
+                body_in = json.loads(raw.decode("utf-8") or "{}")
+            except Exception as e:
+                err = json.dumps({"ok": False, "error": "invalid json: " + str(e)}).encode("utf-8")
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(err)))
+                self.end_headers()
+                self.wfile.write(err)
+                return
+            ok, result = _validate_dashboard_prefs(body_in)
+            if not ok:
+                err = json.dumps({"ok": False, "error": result}).encode("utf-8")
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(err)))
+                self.end_headers()
+                self.wfile.write(err)
+                return
+            _save_dashboard_prefs(result)
+            body = json.dumps({"ok": True}).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
