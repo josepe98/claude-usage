@@ -1339,7 +1339,7 @@ function applyFilter() {
     }
     prevTotals.sessions = prevSessIds.size;
     prevTotals.cost = prevDaily.reduce(
-      (acc, r) => acc + calcCost(r.model, r.input, r.output, r.cache_read, r.cache_creation),
+      (acc, r) => acc + calcCost(r.model, r.input, r.output, r.cache_read, r.cache_creation, r.cache_1h),
       0,
     );
   }
