@@ -2028,7 +2028,6 @@ async function triggerRescan() {
 })();
 
 loadData();
-    await loadData(); _populateThemeDropdown();
   } catch(e) {
     btn.textContent = '\u21bb Rescan (error)';
     console.error(e);
@@ -2083,7 +2082,7 @@ function scheduleAutoRefresh() {
   }
 }
 
-loadData();
+loadData(); _populateThemeDropdown();
 scheduleAutoRefresh();
 </script>
 </body>
