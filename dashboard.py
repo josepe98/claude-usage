@@ -2748,14 +2748,15 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 </div>
 
 <div class="container">
-  <div class="stats-row" id="stats-row" data-block-id="stats-row"></div>
-
-    <div id="pareto-card" data-block-id="pareto-card" style="display:none; margin: -8px 0 16px 0; padding: 10px 14px; background: rgba(217,119,87,0.08); border-radius: 8px; font-size: 12px; color: var(--text);"></div>
+    <div id="pareto-card" data-block-id="pareto-card" style="display:none; margin: 0 0 16px 0; padding: 10px 14px; background: rgba(217,119,87,0.08); border-radius: 8px; font-size: 12px; color: var(--text);"></div>
   <div id="budget-bar" data-block-id="budget-bar" style="display:none; margin:0 0 16px 0;"><div style="display:flex; justify-content:space-between; align-items:baseline; margin-bottom:6px;"><div style="font-size:12px; color:var(--muted);">Monthly budget <span id="budget-label"></span></div><div style="font-size:11px; color:var(--muted);"><a href="#" onclick="_editBudget(); return false;" style="color:var(--muted); text-decoration:underline;">edit</a></div></div><div id="budget-track" style="height:6px; background:rgba(255,255,255,0.08); border-radius:3px; overflow:hidden;"><div id="budget-fill" style="height:100%; background:#4ade80; transition: width 0.3s, background-color 0.3s;"></div></div></div>
   <div id="anomaly-banner" data-block-id="anomaly-banner" style="display:none; padding:10px 14px; margin: 0 0 12px 0; background:rgba(248,113,113,0.12); border-left:3px solid #f87171; border-radius:6px; color:#f87171; font-size:13px;"></div>
     <div id="plan-card" data-block-id="plan-card" style="display:none; margin:0 0 16px 0; padding:10px 14px; background:rgba(74,222,128,0.08); border-radius:8px; font-size:12px; color:var(--text);"></div>
-    <div id="downgrade-card" data-block-id="downgrade-card" style="display:none; margin: -8px 0 16px 0; padding: 10px 14px; background: rgba(74,222,128,0.10); border-radius: 8px; font-size: 12px; color: var(--text);"></div>
-    <div id="cache-hit-card" data-block-id="cache-hit-card" style="display:none; margin: -4px 0 16px 0; padding: 10px 14px; background: rgba(94,106,210,0.08); border-radius: 8px; font-size: 12px; color: var(--text);"></div>
+    <div id="downgrade-card" data-block-id="downgrade-card" style="display:none; margin: 0 0 16px 0; padding: 10px 14px; background: rgba(74,222,128,0.10); border-radius: 8px; font-size: 12px; color: var(--text);"></div>
+    <div id="cache-hit-card" data-block-id="cache-hit-card" style="display:none; margin: 0 0 16px 0; padding: 10px 14px; background: rgba(94,106,210,0.08); border-radius: 8px; font-size: 12px; color: var(--text);"></div>
+
+  <div class="stats-row" id="stats-row" data-block-id="stats-row"></div>
+
     <div id="git-trace-card" data-block-id="git-trace-card" style="display:none; margin: -8px 0 16px 0; padding: 12px 16px; background: rgba(76,175,80,0.08); border: 1px solid rgba(76,175,80,0.18); border-radius: 8px; font-size: 13px; color: var(--text);"></div>
     <details id="inbound-card" data-block-id="inbound-card" style="display:none; margin: -8px 0 16px 0; padding: 10px 14px; background: rgba(94,106,210,0.08); border-radius: 8px; font-size: 12px; color: var(--text);"><summary style="cursor:pointer; user-select:none;"><strong>Recent inbound events</strong> <span id="inbound-count" style="color:var(--muted);"></span></summary><div id="inbound-list" style="margin-top:8px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; line-height: 1.6;"></div></details>
     <div class="chart-card" id="time-on-task-card" data-block-id="time-on-task-card" style="margin-bottom: 16px;">
