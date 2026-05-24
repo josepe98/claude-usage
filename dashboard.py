@@ -2669,11 +2669,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <button id="reset-btn" onclick="_confirmReset()" title="Delete usage.db entirely and re-create empty schema. Run scan afterwards to repopulate." style="background: var(--card); border: 1px solid var(--border); color: var(--muted); padding: 4px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; margin-left: 6px;">&#x1f5d1; Reset DB</button>
     <button id="rescan-btn" onclick="triggerRescan()" title="Rebuild the database from scratch by re-scanning all JSONL files. Use if data looks stale or costs seem wrong.">&#x21bb; Rescan</button>
     <select id="theme-quick" onchange="_onThemeQuickChange(this.value)" title="Quick-switch theme" style="background: var(--card); border: 1px solid var(--border); border-radius: 6px; color: var(--text); padding: 4px 8px; font-size: 12px; margin-right: 6px;"></select>
-    <div id="currency-combobox" class="appearance-btn" style="position:relative; padding:0; display:inline-flex; align-items:center;">
+    <div id="currency-combobox" class="appearance-btn" style="position:relative; padding:0; display:inline-flex; align-items:center; cursor:pointer;" onclick="document.getElementById('currency-input').focus()">
       <input id="currency-input" type="search" autocomplete="off" spellcheck="false"
-             placeholder="USD - search..." aria-label="Display currency"
-             title="Display currency (FX rates from open.er-api.com) - type to filter by code or name"
-             style="background:transparent; border:0; color:var(--text); font:inherit; padding:4px 10px; width:170px; outline:none;" />
+             placeholder="USD - click to change" aria-label="Display currency"
+             title="Display currency — click to pick from 166 ISO 4217 currencies, type to filter by code or name"
+             style="background:transparent; border:0; color:var(--text); font:inherit; padding:4px 4px 4px 10px; width:170px; outline:none; cursor:pointer;" />
+      <span id="currency-chevron" style="padding-right:8px; color:var(--muted); font-size:9px; pointer-events:none; user-select:none;">&#x25BC;</span>
       <div id="currency-dropdown" role="listbox"
            style="display:none; position:absolute; top:calc(100% + 4px); right:0; min-width:280px; max-height:340px; overflow-y:auto; background:var(--card); border:1px solid var(--border); border-radius:8px; box-shadow:0 8px 24px rgba(0,0,0,0.18); z-index:9999; padding:4px 0; font-size:12px;"></div>
     </div>
