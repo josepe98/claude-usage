@@ -98,7 +98,7 @@ class TestApiEndpoints(unittest.TestCase):
         cls.prefs_path = Path(cls.tmp) / "dashboard_prefs.json"
         cls._orig_prefs_path = dashboard.DASHBOARD_PREFS_PATH
         dashboard.DASHBOARD_PREFS_PATH = cls.prefs_path
-        cls.server = ThreadingHTTPServer(("127.0.0.1", 18098), dashboard.DashboardHandler)
+        cls.server = ThreadingHTTPServer(("127.0.0.1", 18298), dashboard.DashboardHandler)
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
         cls.thread.start()
         time.sleep(0.1)
@@ -115,12 +115,12 @@ class TestApiEndpoints(unittest.TestCase):
             self.prefs_path.unlink()
 
     def _get(self):
-        with urllib.request.urlopen("http://127.0.0.1:18098/api/dashboard-prefs") as r:
+        with urllib.request.urlopen("http://127.0.0.1:18298/api/dashboard-prefs") as r:
             return r.status, json.loads(r.read())
 
     def _post(self, body):
         req = urllib.request.Request(
-            "http://127.0.0.1:18098/api/dashboard-prefs",
+            "http://127.0.0.1:18298/api/dashboard-prefs",
             data=json.dumps(body).encode("utf-8"),
             headers={"Content-Type": "application/json"},
             method="POST",
@@ -162,7 +162,7 @@ class TestApiEndpoints(unittest.TestCase):
 
         # POST with bad JSON -> 400.
         req = urllib.request.Request(
-            "http://127.0.0.1:18098/api/dashboard-prefs",
+            "http://127.0.0.1:18298/api/dashboard-prefs",
             data=b"not json",
             headers={"Content-Type": "application/json"},
             method="POST",
