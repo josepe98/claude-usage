@@ -34,7 +34,7 @@ class TestLoadSave(unittest.TestCase):
 
     def test_save_then_load_roundtrip(self):
         prefs = {
-            "order":  ["stats-row", "charts-grid-main"],
+            "order":  ["stats-row", "chart-daily"],
             "hidden": ["pareto-card"],
         }
         dashboard._save_dashboard_prefs(prefs, self.path)
@@ -139,7 +139,7 @@ class TestApiEndpoints(unittest.TestCase):
 
         # POST valid prefs -> ok.
         payload = {
-            "order":  ["charts-grid-main", "stats-row"],
+            "order":  ["chart-daily", "stats-row"],
             "hidden": ["pareto-card"],
         }
         status, body = self._post(payload)

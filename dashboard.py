@@ -273,7 +273,6 @@ DASHBOARD_PREFS_PATH = Path.home() / ".claude" / "dashboard_prefs.json"
 # eight; they're all enumerated here so the validator accepts the full set.
 DASHBOARD_BLOCK_IDS = frozenset({
     "stats-row",
-    "plan-limits-card",
     "pareto-card",
     "budget-bar",
     "anomaly-banner",
@@ -283,8 +282,18 @@ DASHBOARD_BLOCK_IDS = frozenset({
     "git-trace-card",
     "inbound-card",
     "time-on-task-card",
-    "charts-grid-main",
-    "charts-grid-tools",
+    # Individual chart cards (previously wrapped in charts-grid-main /
+    # charts-grid-tools, which made the whole grid one big draggable).  Each
+    # card now carries its own block id so it can be reordered independently
+    # within its parent .charts-grid wrapper.
+    "chart-daily",
+    "chart-dow-hour",
+    "chart-year-calendar",
+    "chart-hourly",
+    "chart-histo",
+    "chart-model",
+    "chart-projects",
+    "chart-tools",
     "cost-by-model-table",
     "recent-sessions-table",
     "session-detail-card",
@@ -1578,146 +1587,6 @@ def _downgrade_suggestions(conn):
     return suggestions[:_DOWNGRADE_TOP_N]
 
 
-def _plan_limits(conn):
-    """Plan-utilization metrics: current 5h + weekly rolling windows per model,
-    auto-detected caps from 30-day high-water marks, and a 48-hour 5h-sparkline.
-
-    Caps are observational (max-ever-seen in the last 30 days), not Anthropic
-    plan guesses — the user explicitly didn't want estimated message-count caps.
-    All values are real: turns, billable tokens, USD cost equivalent."""
-    from datetime import datetime, timedelta, timezone
-    try:
-        import pricing
-        calc_cost = pricing.calc_cost
-    except Exception:  # pricing module is optional in some forks
-        calc_cost = lambda *a, **kw: 0.0  # noqa: E731
-
-    rows = conn.execute("""
-        SELECT timestamp,
-               COALESCE(NULLIF(model, ''), 'unknown') AS model,
-               COALESCE(input_tokens, 0)              AS input,
-               COALESCE(output_tokens, 0)             AS output,
-               COALESCE(cache_read_tokens, 0)         AS cache_read,
-               COALESCE(cache_creation_tokens, 0)     AS cache_creation
-        FROM turns
-        WHERE timestamp IS NOT NULL AND length(timestamp) >= 19
-        ORDER BY timestamp ASC
-    """).fetchall()
-
-    now = datetime.now(timezone.utc)
-    horizon = now - timedelta(days=30)
-
-    parsed = []
-    for r in rows:
-        try:
-            ts = datetime.fromisoformat(r["timestamp"].replace("Z", "+00:00"))
-        except Exception:
-            continue
-        if ts < horizon:
-            continue
-        tokens = ((r["input"] or 0) + (r["output"] or 0)
-                  + (r["cache_read"] or 0) + (r["cache_creation"] or 0))
-        try:
-            cost = calc_cost(r["model"], r["input"] or 0, r["output"] or 0,
-                             r["cache_read"] or 0, r["cache_creation"] or 0)
-        except Exception:
-            cost = 0.0
-        parsed.append((ts, r["model"], tokens, cost))
-
-    if not parsed:
-        return {"models": [], "overall": None, "computed_at": now.isoformat()}
-
-    by_model = {}
-    for ts, model, tokens, cost in parsed:
-        by_model.setdefault(model, []).append((ts, tokens, cost))
-
-    def window_stats(turns_list, start, end):
-        in_w = [t for t in turns_list if start <= t[0] <= end]
-        return {
-            "turns":  len(in_w),
-            "tokens": sum(t[1] for t in in_w),
-            "cost":   round(sum(t[2] for t in in_w), 4),
-        }
-
-    def max_window(turns_list, hours):
-        """Two-pointer sweep: highest billable-token sum in any `hours`-wide
-        window across the chronological turns_list. Returns the window stats
-        + when its rightmost turn occurred."""
-        if not turns_list:
-            return None
-        w = timedelta(hours=hours)
-        best = {"turns": 0, "tokens": 0, "cost": 0.0, "ends_at": None}
-        left = 0
-        run_turns = run_tokens = 0
-        run_cost = 0.0
-        for right in range(len(turns_list)):
-            run_turns  += 1
-            run_tokens += turns_list[right][1]
-            run_cost   += turns_list[right][2]
-            while turns_list[right][0] - turns_list[left][0] > w:
-                run_turns  -= 1
-                run_tokens -= turns_list[left][1]
-                run_cost   -= turns_list[left][2]
-                left += 1
-            if run_tokens > best["tokens"]:
-                best = {
-                    "turns":   run_turns,
-                    "tokens":  run_tokens,
-                    "cost":    round(run_cost, 4),
-                    "ends_at": turns_list[right][0].isoformat(),
-                }
-        return best
-
-    models_out = []
-    for model in sorted(by_model.keys()):
-        turns_list = by_model[model]
-        cur_5h = window_stats(turns_list, now - timedelta(hours=5), now)
-        cur_7d = window_stats(turns_list, now - timedelta(days=7),  now)
-        max_5h = max_window(turns_list, hours=5)
-        max_7d = max_window(turns_list, hours=24 * 7)
-
-        # 48h sparkline of 5h-rolling token totals, sampled every 30 minutes.
-        spark = []
-        step = timedelta(minutes=30)
-        win  = timedelta(hours=5)
-        cursor = now - timedelta(hours=48)
-        while cursor <= now:
-            ws = window_stats(turns_list, cursor - win, cursor)
-            spark.append({
-                "t":      cursor.isoformat(),
-                "turns":  ws["turns"],
-                "tokens": ws["tokens"],
-                "cost":   ws["cost"],
-            })
-            cursor += step
-
-        models_out.append({
-            "model":         model,
-            "current_5h":    cur_5h,
-            "current_7d":    cur_7d,
-            "max_5h_30d":    max_5h,
-            "max_7d_30d":    max_7d,
-            "sparkline_48h": spark,
-        })
-
-    all_turns = [(ts, tk, c) for ts, _m, tk, c in parsed]
-    all_turns.sort(key=lambda x: x[0])
-    overall = {
-        "model":      "ALL",
-        "current_5h": window_stats(all_turns, now - timedelta(hours=5), now),
-        "current_7d": window_stats(all_turns, now - timedelta(days=7),  now),
-        "max_5h_30d": max_window(all_turns, hours=5),
-        "max_7d_30d": max_window(all_turns, hours=24 * 7),
-    }
-
-    return {
-        "computed_at": now.isoformat(),
-        "overall":     overall,
-        "models":      models_out,
-        "note":        "Caps auto-detected from your 30-day high-water marks (real data, not estimated plan limits).",
-    }
-
-
 def get_dashboard_data(db_path=DB_PATH):
     if not db_path.exists():
         return {"error": "Database not found. Run: python cli.py scan"}
@@ -1995,7 +1864,6 @@ def get_dashboard_data(db_path=DB_PATH):
     all_machines = [m["machine_id"] for m in by_machine]
 
     time_on_task = _time_on_task(conn)
-    plan_limits = _plan_limits(conn)
     conn.close()
 
     # ── Account summary (sessions + tokens per account, all-time) ─────────────
@@ -2031,7 +1899,6 @@ def get_dashboard_data(db_path=DB_PATH):
         "accounts":        accounts,
         "by_machine":      by_machine,
         "time_on_task":    time_on_task,
-        "plan_limits":     plan_limits,
         "generated_at":    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "plan_recommendation": plan_recommendation,
         "generated_at":       datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -2569,7 +2436,6 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .container { max-width: 1200px; margin: 0 auto; padding: 32px 24px; }
   .stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 16px; margin-bottom: 24px; }
   /* Plan utilization (5h + weekly) */
-  .plan-limits-card { background: var(--card); border-radius: var(--card-radius); border: var(--card-border); padding: 20px; margin-bottom: 24px; box-shadow: var(--shadow); display: none !important; }
   .pl-header { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 16px; gap: 12px; flex-wrap: wrap; }
   .pl-header h2 { font-size: 15px; font-weight: 600; letter-spacing: -0.24px; color: var(--text); margin: 0; }
   .pl-note { color: var(--muted); font-size: 11px; }
@@ -2843,23 +2709,6 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
 <div class="container">
   <div class="stats-row" id="stats-row" data-block-id="stats-row"></div>
-  <div class="plan-limits-card" id="plan-limits-card" data-block-id="plan-limits-card" style="display:none;">
-    <div class="pl-header">
-      <h2>Plan Utilization</h2>
-      <span class="pl-note" id="pl-note"></span>
-    </div>
-    <div class="pl-rows" id="pl-rows"></div>
-    <div class="pl-charts">
-      <div class="pl-chart-wrap">
-        <div class="pl-chart-title">5-hour rolling window (last 48h)</div>
-        <div class="chart-wrap"><canvas id="chart-plan-spark"></canvas></div>
-      </div>
-      <div class="pl-chart-wrap">
-        <div class="pl-chart-title">Weekly tokens per day (current week)</div>
-        <div class="chart-wrap"><canvas id="chart-plan-weekly"></canvas></div>
-      </div>
-    </div>
-  </div>
 
     <div id="pareto-card" data-block-id="pareto-card" style="display:none; margin: -8px 0 16px 0; padding: 10px 14px; background: rgba(217,119,87,0.08); border-radius: 8px; font-size: 12px; color: var(--text);"></div>
   <div id="budget-bar" data-block-id="budget-bar" style="display:none; margin:0 0 16px 0;"><div style="display:flex; justify-content:space-between; align-items:baseline; margin-bottom:6px;"><div style="font-size:12px; color:var(--muted);">Monthly budget <span id="budget-label"></span></div><div style="font-size:11px; color:var(--muted);"><a href="#" onclick="_editBudget(); return false;" style="color:var(--muted); text-decoration:underline;">edit</a></div></div><div id="budget-track" style="height:6px; background:rgba(255,255,255,0.08); border-radius:3px; overflow:hidden;"><div id="budget-fill" style="height:100%; background:#4ade80; transition: width 0.3s, background-color 0.3s;"></div></div></div>
@@ -2894,17 +2743,17 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         </div>
       </div>
     </div>
-  <div class="charts-grid" data-block-id="charts-grid-main">
-    <div class="chart-card wide">
+  <div class="charts-grid">
+    <div class="chart-card wide" data-block-id="chart-daily">
       <h2 id="daily-chart-title">Daily Token Usage</h2>
       <div class="chart-wrap tall"><canvas id="chart-daily"></canvas></div>
     </div>
-    <div class="chart-card wide">
+    <div class="chart-card wide" data-block-id="chart-dow-hour">
       <h2>Activity by Day-of-Week × Hour (UTC)</h2>
       <div class="dow-hour-wrap"><div id="dow-hour-grid" style="font-size: 10px; color: var(--muted);"></div></div>
     </div>
 
-    <div class="chart-card wide">
+    <div class="chart-card wide" data-block-id="chart-year-calendar">
       <div class="chart-header">
         <h2>Activity (last 365 days)</h2>
         <div class="chart-header-right">
@@ -2922,7 +2771,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         <span>More</span>
       </div>
     </div>
-    <div class="chart-card wide">
+    <div class="chart-card wide" data-block-id="chart-hourly">
       <div class="chart-header">
         <h2 id="hourly-chart-title">Average Hourly Distribution</h2>
         <div class="chart-header-right">
@@ -2936,24 +2785,24 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       </div>
       <div class="chart-wrap"><canvas id="chart-hourly"></canvas></div>
     </div>
-    <div class="chart-card">
+    <div class="chart-card" data-block-id="chart-histo">
       <h2>Cost per Turn Distribution</h2>
       <div id="histo-stats" style="font-size: 11px; color: var(--muted); margin-bottom: 8px;"></div>
       <div class="chart-wrap"><canvas id="chart-histo"></canvas></div>
     </div>
 
-    <div class="chart-card">
+    <div class="chart-card" data-block-id="chart-model">
       <h2>By Model</h2>
       <div class="chart-wrap"><canvas id="chart-model"></canvas></div>
     </div>
-    <div class="chart-card">
+    <div class="chart-card" data-block-id="chart-projects">
       <h2>Top Projects by Tokens</h2>
       <div class="chart-wrap"><canvas id="chart-project"></canvas></div>
     </div>
   </div>
 
-  <div class="charts-grid" data-block-id="charts-grid-tools" style="grid-template-columns: 1fr;">
-    <div class="chart-card">
+  <div class="charts-grid" style="grid-template-columns: 1fr;">
+    <div class="chart-card" data-block-id="chart-tools">
       <h2>Top Tools by Turns</h2>
       <div id="tools-chart-empty" style="display:none; color:var(--muted); padding:24px 0; text-align:center;">No tool_name data yet — older transcripts may not have tool info.</div>
       <div class="chart-wrap"><canvas id="chart-tools"></canvas></div>
@@ -3971,8 +3820,6 @@ function applyFilter() {
   renderTimeOnTask();
   renderBranchOnlyCostTable(lastByBranch.slice(0, 20));
   renderCache1hOpportunities(rawData.cache_1h_opportunities || []);
-  // renderPlanLimits() removed: auto-detect from 30d high-water marks doesn't
-  // match Anthropic's real plan cap (off by ~2x). Backend kept dormant.
 
   const visibleSessions = lastFilteredSessions.slice(0, 20);
   if (!visibleSessions.length) {
@@ -4370,97 +4217,6 @@ function renderYearCalendar(rows) {
 }
 
 // ── Plan limits: 5h + weekly rolling utilization ─────────────────────────
-let planSparkChart = null;
-let planWeeklyChart = null;
-function _plFmtTokens(n) { if (n >= 1e9) return (n/1e9).toFixed(2) + 'B'; if (n >= 1e6) return (n/1e6).toFixed(1) + 'M'; if (n >= 1e3) return (n/1e3).toFixed(1) + 'K'; return String(n|0); }
-function _plFmtCost(n) { return '$' + (n || 0).toFixed(2); }
-function _plRow(label, sub, cur, max, fmt) {
-  const pct = max && max > 0 ? Math.min(1, cur / max) : 0;
-  const cls = pct >= 0.9 ? 'pl-fill-hot' : pct >= 0.7 ? 'pl-fill-warn' : 'pl-fill-ok';
-  const pctTxt = max && max > 0 ? (pct * 100).toFixed(0) + '%' : '—';
-  return '<div class="pl-bar-wrap"><div class="pl-bar-meta"><span>' + fmt(cur) + ' of ' + (max ? fmt(max) : '—') + '</span><span>' + pctTxt + '</span></div><div class="pl-bar"><div class="pl-bar-fill ' + cls + '" style="width:' + (pct * 100).toFixed(1) + '%"></div></div></div>';
-}
-function renderPlanLimits() {  // eslint-disable-line no-unused-vars
-  const card = document.getElementById('plan-limits-card');
-  const pl = rawData && rawData.plan_limits;
-  if (!card || !pl || !pl.models || !pl.models.length) {
-    if (card) card.style.display = 'none';
-    return;
-  }
-  card.style.display = '';
-  document.getElementById('pl-note').textContent = pl.note || '';
-  const rows = document.getElementById('pl-rows');
-  const list = [pl.overall].concat(pl.models);
-  rows.innerHTML = list.map(m => {
-    const lbl = m.model === 'ALL' ? 'All models combined' : m.model;
-    return '<div class="pl-row"><div class="pl-row-label">' + lbl + '<span class="pl-sub">5h rolling · weekly rolling</span></div>' +
-           _plRow('5h', '', m.current_5h.tokens, m.max_5h_30d ? m.max_5h_30d.tokens : 0, _plFmtTokens) +
-           _plRow('7d', '', m.current_7d.tokens, m.max_7d_30d ? m.max_7d_30d.tokens : 0, _plFmtTokens) +
-           '</div>';
-  }).join('');
-
-  // 5h sparkline — overlay the biggest 3 models (or first 3 alphabetically)
-  const top = pl.models.slice().sort((a, b) => (b.max_5h_30d ? b.max_5h_30d.tokens : 0) - (a.max_5h_30d ? a.max_5h_30d.tokens : 0)).slice(0, 3);
-  const labels = (top[0] && top[0].sparkline_48h) ? top[0].sparkline_48h.map(s => s.t.slice(11, 16)) : [];
-  const colors = ['rgba(0,113,227,0.85)', 'rgba(217,119,87,0.85)', 'rgba(74,222,128,0.85)'];
-  const datasets = top.map((m, i) => ({
-    label: m.model,
-    data: (m.sparkline_48h || []).map(s => s.tokens),
-    borderColor: colors[i],
-    backgroundColor: colors[i].replace('0.85', '0.15'),
-    fill: true,
-    pointRadius: 0,
-    tension: 0.3,
-  }));
-  const sCtx = document.getElementById('chart-plan-spark');
-  if (sCtx && labels.length) {
-    if (planSparkChart) planSparkChart.destroy();
-    planSparkChart = new Chart(sCtx, {
-      type: 'line',
-      data: { labels: labels, datasets: datasets },
-      options: {
-        responsive: true, maintainAspectRatio: false,
-        plugins: { legend: { labels: { color: 'var(--muted)', boxWidth: 10, font: { size: 10 } } } },
-        scales: {
-          x: { ticks: { color: 'var(--muted)', font: { size: 9 }, maxTicksLimit: 10 } },
-          y: { ticks: { color: 'var(--muted)', font: { size: 9 }, callback: v => _plFmtTokens(v) }, beginAtZero: true },
-        },
-      },
-    });
-  }
-
-  // Weekly tokens-per-day bar chart (last 7 days)
-  const allTurnsBy = {};
-  for (const r of (rawData.daily_by_model || [])) {
-    if (!allTurnsBy[r.day]) allTurnsBy[r.day] = 0;
-    allTurnsBy[r.day] += (r.input || 0) + (r.output || 0) + (r.cache_read || 0) + (r.cache_creation || 0);
-  }
-  const days = Object.keys(allTurnsBy).sort().slice(-7);
-  const wCtx = document.getElementById('chart-plan-weekly');
-  if (wCtx && days.length) {
-    if (planWeeklyChart) planWeeklyChart.destroy();
-    const data = days.map(d => allTurnsBy[d]);
-    const cap = pl.overall && pl.overall.max_7d_30d ? pl.overall.max_7d_30d.tokens / 7 : 0;
-    planWeeklyChart = new Chart(wCtx, {
-      type: 'bar',
-      data: {
-        labels: days.map(d => d.slice(5)),
-        datasets: [
-          { label: 'Daily tokens', data: data, backgroundColor: 'rgba(0,113,227,0.7)' },
-          cap > 0 ? { label: 'Avg cap (max7d/7)', data: days.map(() => cap), type: 'line', borderColor: '#fbbf24', borderDash: [4, 4], pointRadius: 0, fill: false } : null,
-        ].filter(Boolean),
-      },
-      options: {
-        responsive: true, maintainAspectRatio: false,
-        plugins: { legend: { labels: { color: 'var(--muted)', boxWidth: 10, font: { size: 10 } } } },
-        scales: {
-          x: { ticks: { color: 'var(--muted)', font: { size: 9 } } },
-          y: { ticks: { color: 'var(--muted)', font: { size: 9 }, callback: v => _plFmtTokens(v) }, beginAtZero: true },
-        },
-      },
-    });
-  }
-}
 
 
 // Bucket rows into 24 hours (display-TZ), summing turns + output, and count
@@ -5631,7 +5387,6 @@ async function loadData() {
 
     renderGitTraceCard(d.git_trace_recent || []);
     applyFilter();
-    // renderPlanLimits() removed (see comment in shared renderers block)
   } catch(e) {
     console.error(e);
   }
@@ -5730,13 +5485,18 @@ if ("serviceWorker" in navigator) {
 
 // ── Dashboard customization (drag-reorder + per-block hide) ────────────────
 // Default canonical order — includes every section the mega-merge introduces
-// (plan-limits, budget bar, anomaly banner, plan/downgrade/cache cards, git
+// (budget bar, anomaly banner, plan/downgrade/cache cards, git
 // trace, inbound feed, time-on-task, tools chart, cost-by-branch table) so
 // "Reset to defaults" puts them back in a sensible position.
 const DASHBOARD_BLOCK_IDS = [
-  'stats-row', 'plan-limits-card', 'pareto-card', 'budget-bar', 'anomaly-banner',
+  'stats-row', 'pareto-card', 'budget-bar', 'anomaly-banner',
   'plan-card', 'downgrade-card', 'cache-hit-card', 'git-trace-card', 'inbound-card',
-  'time-on-task-card', 'charts-grid-main', 'charts-grid-tools',
+  'time-on-task-card',
+  // Per-card chart blocks (previously wrapped in charts-grid-main /
+  // charts-grid-tools).  Each card lives inside a .charts-grid wrapper and
+  // is reordered within that wrapper, not the top-level container.
+  'chart-daily', 'chart-dow-hour', 'chart-year-calendar', 'chart-hourly',
+  'chart-histo', 'chart-model', 'chart-projects', 'chart-tools',
   'cost-by-model-table', 'recent-sessions-table', 'session-detail-card',
   'cost-by-project-table', 'cost-by-project-branch-table', 'cost-by-branch-card',
 ];
@@ -5746,8 +5506,10 @@ let dragSrcId = null;
 
 function _containerEl() { return document.querySelector('.container'); }
 
+// Every [data-block-id] in the document — top-level container children AND
+// chart-cards nested inside .charts-grid wrappers.  Returned in DOM order.
 function _allBlocks() {
-  return Array.from(_containerEl().querySelectorAll(':scope > [data-block-id]'));
+  return Array.from(document.querySelectorAll('[data-block-id]'));
 }
 
 function applyDashboardPrefs(prefs) {
@@ -5758,17 +5520,22 @@ function applyDashboardPrefs(prefs) {
   const container = _containerEl();
   if (!container) return;
   // Reorder: known IDs first in prefs.order, then any new blocks the user
-  // hasn't seen yet (keeps forward compat when we add new sections).
+  // hasn't seen yet (keeps forward compat when we add new sections).  Each
+  // block is re-appended to its CURRENT parent — so chart-cards stay inside
+  // their .charts-grid wrapper, and top-level blocks stay in .container.
   if (dashboardPrefs.order.length) {
     const blocksById = {};
     _allBlocks().forEach(b => { blocksById[b.dataset.blockId] = b; });
     const seen = new Set();
     dashboardPrefs.order.forEach(id => {
-      if (blocksById[id]) { container.appendChild(blocksById[id]); seen.add(id); }
+      const b = blocksById[id];
+      if (b && b.parentNode) { b.parentNode.appendChild(b); seen.add(id); }
     });
-    // Append unseen blocks at the end in their current DOM order.
+    // Append unseen blocks at the end of their current parent in DOM order.
     Object.keys(blocksById).forEach(id => {
-      if (!seen.has(id)) container.appendChild(blocksById[id]);
+      if (seen.has(id)) return;
+      const b = blocksById[id];
+      if (b && b.parentNode) b.parentNode.appendChild(b);
     });
   }
   const hidden = new Set(dashboardPrefs.hidden);
@@ -5829,6 +5596,10 @@ function _ensureOverlays() {
     });
     block.addEventListener('dragover', (e) => {
       if (!editMode || dragSrcId === null || block.dataset.blockId === dragSrcId) return;
+      // Only allow drops onto siblings (same parent) — keeps chart-cards
+      // inside their .charts-grid wrapper and top-level blocks in .container.
+      const src = document.querySelector('[data-block-id="' + dragSrcId + '"]');
+      if (!src || src.parentNode !== block.parentNode) return;
       e.preventDefault();
       try { e.dataTransfer.dropEffect = 'move'; } catch(_) {}
       block.classList.add('drop-target');
@@ -5840,14 +5611,17 @@ function _ensureOverlays() {
       block.classList.remove('drop-target');
       const src = document.querySelector('[data-block-id="' + dragSrcId + '"]');
       if (!src || src === block) return;
-      const container = _containerEl();
-      const blocks = _allBlocks();
-      const srcIdx = blocks.indexOf(src);
-      const dstIdx = blocks.indexOf(block);
+      // Sibling-only reorder: bail if the drop target lives in a different
+      // parent (e.g. dragging a chart-card outside its .charts-grid).
+      const parent = block.parentNode;
+      if (src.parentNode !== parent) return;
+      const siblings = Array.from(parent.querySelectorAll(':scope > [data-block-id]'));
+      const srcIdx = siblings.indexOf(src);
+      const dstIdx = siblings.indexOf(block);
       if (srcIdx < dstIdx) {
-        container.insertBefore(src, block.nextSibling);
+        parent.insertBefore(src, block.nextSibling);
       } else {
-        container.insertBefore(src, block);
+        parent.insertBefore(src, block);
       }
     });
   });
@@ -5869,12 +5643,14 @@ function toggleEditMode() {
 }
 
 async function resetDashboardPrefs() {
-  // Reset to the canonical default order and unhide everything.
-  const container = _containerEl();
+  // Reset to the canonical default order and unhide everything.  Each block
+  // is appended back to its CURRENT parent (chart-cards stay in their
+  // .charts-grid; top-level blocks stay in .container).
   const blocksById = {};
   _allBlocks().forEach(b => { blocksById[b.dataset.blockId] = b; });
   DASHBOARD_BLOCK_IDS.forEach(id => {
-    if (blocksById[id]) container.appendChild(blocksById[id]);
+    const b = blocksById[id];
+    if (b && b.parentNode) b.parentNode.appendChild(b);
   });
   _allBlocks().forEach(b => b.classList.remove('block-hidden'));
   // Sync overlay checkboxes if they're rendered.
