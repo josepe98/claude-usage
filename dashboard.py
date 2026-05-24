@@ -5,6 +5,9 @@ dashboard.py - Local web dashboard served on localhost:8080.
 import json
 import os
 import sqlite3
+import time
+import urllib.request
+import urllib.error
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 from pathlib import Path
@@ -165,6 +168,55 @@ def get_themes():
             pass
     return list(themes.values())
 
+
+
+
+# ── Currency / FX rates ────────────────────────────────────────────────────
+# Frankfurter (https://www.frankfurter.app) is an open, no-key, ECB-sourced
+# daily FX rates API. We cache results in-process for 6 hours; the frontend
+# also caches in localStorage for 24 hours.
+FX_CACHE_TTL_SECONDS = 6 * 60 * 60
+_FX_CACHE = {"data": None, "fetched_at": 0.0}
+
+
+def _fx_urlopen(url, timeout=5):
+    """Thin wrapper around urllib.request.urlopen so tests can patch a single symbol."""
+    return urllib.request.urlopen(url, timeout=timeout)
+
+
+def _fetch_fx_rates(base="USD", target_currencies=None):
+    """Fetch latest FX rates from frankfurter.app.
+
+    Returns a dict like {"base": "USD", "date": "2026-05-23",
+    "rates": {"EUR": 0.92, ...}, "as_of": <iso ts>}, or None on failure.
+    Uses an in-process cache for FX_CACHE_TTL_SECONDS (default 6h).
+    """
+    now = time.time()
+    cached = _FX_CACHE.get("data")
+    if cached and (now - _FX_CACHE.get("fetched_at", 0)) < FX_CACHE_TTL_SECONDS:
+        return cached
+    url = "https://api.frankfurter.app/latest?from=" + base
+    try:
+        with _fx_urlopen(url, timeout=5) as resp:
+            raw = resp.read()
+        parsed = json.loads(raw)
+    except Exception:  # noqa: BLE001 - network/JSON failures both -> None
+        return None
+    rates = parsed.get("rates") or {}
+    # Always make sure the base currency is present at 1.0 so the frontend
+    # can iterate a single dict.
+    rates[base] = 1.0
+    if target_currencies:
+        rates = {k: v for k, v in rates.items() if k in set(target_currencies) | {base}}
+    out = {
+        "base": base,
+        "date": parsed.get("date"),
+        "rates": rates,
+        "as_of": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+    }
+    _FX_CACHE["data"] = out
+    _FX_CACHE["fetched_at"] = now
+    return out
 
 
 def _cost_concentration(sessions_with_cost, top_n=5):
@@ -663,6 +715,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   header .meta { color: var(--muted); font-size: 12px; letter-spacing: -0.12px; }
   .appearance-btn { background: transparent; border: 1px solid var(--border); border-radius: 6px; color: var(--muted); font-size: 12px; padding: 4px 12px; cursor: pointer; letter-spacing: -0.12px; transition: all 0.15s; white-space: nowrap; }
   .appearance-btn:hover { border-color: var(--accent); color: var(--accent); }
+  select.appearance-btn { font-family: inherit; appearance: none; -webkit-appearance: none; padding-right: 22px; background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%); background-position: calc(100% - 12px) 50%, calc(100% - 7px) 50%; background-size: 5px 5px, 5px 5px; background-repeat: no-repeat; }
+  select.appearance-btn:hover { color: var(--accent); }
   .link-btn { background: transparent; border: none; color: var(--muted); cursor: pointer; font-size: 11px; padding: 4px 8px; }
   .link-btn:hover { color: var(--text); text-decoration: underline; }
   #rescan-btn { background: var(--card); border: 1px solid var(--border); color: var(--muted); padding: 4px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; }
@@ -792,6 +846,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <div class="meta" id="meta">Loading...</div>
     <button class="link-btn" onclick="_resetPrefs()" title="Clear saved range / model / theme preferences and reload">Reset prefs</button>
       <button id="rescan-btn" onclick="triggerRescan()" title="Rebuild the database from scratch by re-scanning all JSONL files. Use if data looks stale or costs seem wrong.">&#x21bb; Rescan</button>
+    <select id="currency-select" class="appearance-btn" title="Display currency (FX rates from frankfurter.app)" onchange="onCurrencyChange(this.value)">
+      <option value="USD">USD $</option>
+    </select>
     <button class="appearance-btn" onclick="window.open('/themes','_blank')">Appearance</button>
   </div>
 </header>
@@ -924,6 +981,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       &nbsp;&middot;&nbsp;
       License: MIT
     </p>
+    <p id="fx-footer" style="display:none">FX rates from <a href="https://www.frankfurter.app" target="_blank">frankfurter.app</a> &middot; updated <span id="fx-asof">?</span></p>
   </div>
 </footer>
 
@@ -1078,8 +1136,121 @@ function fmt(n) {
   if (n >= 1e3) return (n/1e3).toFixed(1)+'K';
   return n.toLocaleString();
 }
-function fmtCost(c)    { return '$' + c.toFixed(4); }
-function fmtCostBig(c) { return '$' + c.toFixed(2); }
+// ── Currency / FX (USD-based; rates come from /api/fx-rates) ──────────────
+const FX_LS_KEY            = 'fx_rates';
+const FX_CURRENCY_LS_KEY   = 'fx_currency';
+const FX_CLIENT_TTL_MS     = 24 * 60 * 60 * 1000;  // 24h
+const CURRENCY_SYMBOLS = {
+  USD: '$', EUR: '€', GBP: '£', JPY: '¥', CNY: '¥',
+  CHF: 'CHF ', CAD: 'C$', AUD: 'A$', NZD: 'NZ$', SGD: 'S$', HKD: 'HK$',
+  CZK: ' Kč', PLN: ' zł', SEK: ' kr', NOK: ' kr',
+  DKK: ' kr', HUF: ' Ft', RON: ' lei', BGN: ' lv',
+  ISK: ' kr', INR: '₹', KRW: '₩', BRL: 'R$', MXN: 'Mex$',
+  ZAR: 'R', TRY: '₺', ILS: '₪', THB: '฿', PHP: '₱',
+  IDR: 'Rp', MYR: 'RM',
+};
+// Symbols that follow the number (with a leading thin space).
+const SYMBOL_SUFFIX = new Set(['CZK','PLN','SEK','NOK','DKK','HUF','RON','BGN','ISK','CHF']);
+let fxState = {
+  base: 'USD',
+  rates: { USD: 1.0 },
+  asOf: null,
+  currency: (localStorage.getItem(FX_CURRENCY_LS_KEY) || 'USD'),
+};
+
+function _symbolFor(cur) { return CURRENCY_SYMBOLS[cur] || (cur + ' '); }
+function convertCost(usdAmount) {
+  if (typeof usdAmount !== 'number' || !isFinite(usdAmount)) return 0;
+  const r = (fxState.rates && fxState.rates[fxState.currency]);
+  return (typeof r === 'number') ? usdAmount * r : usdAmount;
+}
+function _fmtAmount(value, digits) {
+  const cur = fxState.currency;
+  // Currencies with no minor units / where decimals are noisy.
+  if (cur === 'JPY' || cur === 'KRW' || cur === 'HUF' || cur === 'IDR') {
+    digits = (digits >= 2) ? 0 : 0;
+  }
+  return value.toFixed(digits);
+}
+function fmtCostCurrency(usdAmount, digits) {
+  if (typeof digits !== 'number') digits = 2;
+  const value = convertCost(usdAmount);
+  const sym = _symbolFor(fxState.currency);
+  const formatted = _fmtAmount(value, digits);
+  return SYMBOL_SUFFIX.has(fxState.currency) ? (formatted + sym) : (sym + formatted);
+}
+function fmtCost(c)    { return fmtCostCurrency(c, 4); }
+function fmtCostBig(c) { return fmtCostCurrency(c, 2); }
+
+async function _loadFxRates() {
+  // Try localStorage cache first.
+  try {
+    const raw = localStorage.getItem(FX_LS_KEY);
+    if (raw) {
+      const cached = JSON.parse(raw);
+      if (cached && cached.cached_at && (Date.now() - cached.cached_at) < FX_CLIENT_TTL_MS
+          && cached.rates && typeof cached.rates === 'object') {
+        fxState.rates = cached.rates;
+        fxState.asOf  = cached.as_of || null;
+        fxState.base  = cached.base || 'USD';
+        return;
+      }
+    }
+  } catch (e) { /* ignore */ }
+  try {
+    const resp = await fetch('/api/fx-rates');
+    const d = await resp.json();
+    if (d && d.rates) {
+      fxState.rates = d.rates;
+      fxState.asOf  = d.as_of || null;
+      fxState.base  = d.base || 'USD';
+      try {
+        localStorage.setItem(FX_LS_KEY, JSON.stringify({
+          rates: d.rates, as_of: d.as_of, base: d.base || 'USD',
+          cached_at: Date.now(), fallback: !!d.fallback,
+        }));
+      } catch (e) { /* ignore quota */ }
+    }
+  } catch (e) { console.error('FX fetch failed', e); }
+}
+
+function _populateCurrencyOptions() {
+  const sel = document.getElementById('currency-select');
+  if (!sel) return;
+  const codes = Object.keys(fxState.rates || {});
+  // Make sure USD is always present and first.
+  if (codes.indexOf('USD') === -1) codes.unshift('USD');
+  codes.sort((a, b) => (a === 'USD' ? -1 : b === 'USD' ? 1 : a.localeCompare(b)));
+  sel.innerHTML = codes.map(c =>
+    `<option value="${c}"${c === fxState.currency ? ' selected' : ''}>${c} ${_symbolFor(c).trim() || ''}</option>`
+  ).join('');
+  if (!fxState.rates[fxState.currency]) {
+    fxState.currency = 'USD';
+    sel.value = 'USD';
+  }
+  if (fxState.asOf) {
+    const footer = document.getElementById('fx-footer');
+    const asof   = document.getElementById('fx-asof');
+    if (asof) asof.textContent = fxState.asOf;
+    if (footer) footer.style.display = '';
+  }
+}
+
+function onCurrencyChange(code) {
+  fxState.currency = code || 'USD';
+  try { localStorage.setItem(FX_CURRENCY_LS_KEY, fxState.currency); } catch (e) {}
+  if (typeof applyFilter === 'function' && typeof rawData !== 'undefined' && rawData) {
+    applyFilter();
+  }
+}
+
+// Kick off FX load early. When done, populate dropdown and re-render if data is ready.
+_loadFxRates().then(() => {
+  _populateCurrencyOptions();
+  if (typeof rawData !== 'undefined' && rawData && typeof applyFilter === 'function') {
+    applyFilter();
+  }
+});
 
 // ── Chart colors ───────────────────────────────────────────────────────────
 function tokenColors() {
@@ -2137,6 +2308,24 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         elif self.path == "/api/themes":
             body = json.dumps(get_themes()).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif self.path == "/api/fx-rates":
+            data = _fetch_fx_rates()
+            if data is None:
+                payload = {
+                    "error": "FX fetch failed",
+                    "fallback": True,
+                    "base": "USD",
+                    "rates": {"USD": 1.0},
+                    "as_of": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                }
+            else:
+                payload = data
+            body = json.dumps(payload).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
