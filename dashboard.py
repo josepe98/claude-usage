@@ -194,8 +194,14 @@ _FX_CACHE = {"data": None, "fetched_at": 0.0}
 
 
 def _fx_urlopen(url, timeout=5):
-    """Thin wrapper around urllib.request.urlopen so tests can patch a single symbol."""
-    return urllib.request.urlopen(url, timeout=timeout)
+    """Thin wrapper around urllib.request.urlopen so tests can patch a single symbol.
+    Frankfurter rejects the default Python-urllib User-Agent with HTTP 403, so we
+    pass an explicit UA on every request."""
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "claude-usage-dashboard/1.0 (+https://github.com/josepe98/claude-usage)",
+        "Accept": "application/json",
+    })
+    return urllib.request.urlopen(req, timeout=timeout)
 
 
 def _fetch_fx_rates(base="USD", target_currencies=None):
