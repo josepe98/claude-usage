@@ -2197,7 +2197,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
     def do_POST(self):
-        path = urlparse(self.path).path if 'urlparse' in globals() else self.path.split('?', 1)[0]
+        path = urlparse(self.path).path
         if path == "/api/reset":
             # Wipe usage.db entirely. Caller is expected to re-run scan
             # afterwards to repopulate (or use /api/rescan?full=1 in
@@ -2220,8 +2220,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
-        
-        path = urlparse(self.path).path
+
         if path == "/api/rescan":
             # Default: incremental scan (fast, non-destructive).
             # Opt-in full rebuild with ?full=1 — useful when pricing or
