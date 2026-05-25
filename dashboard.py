@@ -181,7 +181,6 @@ def get_themes():
     return list(themes.values())
 
 
-
 def _cost_concentration(sessions_with_cost, top_n=5):
     """Compute Pareto-style concentration: top-N sessions' cost as % of total."""
     if not sessions_with_cost:
