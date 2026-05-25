@@ -189,7 +189,11 @@ def _cost_concentration(sessions_with_cost, top_n=5):
     }
 
 
-def get_dashboard_data(db_path=DB_PATH):
+def get_dashboard_data(db_path=None):
+    # Look up DB_PATH at call time, not at def time, so tests that patch
+    # ``dashboard.DB_PATH`` (or ``scanner.DB_PATH``) are honoured.
+    if db_path is None:
+        db_path = DB_PATH
     if not db_path.exists():
         return {"error": "Database not found. Run: python cli.py scan"}
 
@@ -319,7 +323,10 @@ def get_dashboard_data(db_path=DB_PATH):
     }
 
 
-def get_session_detail(session_id, db_path=DB_PATH):
+def get_session_detail(session_id, db_path=None):
+    # Look up DB_PATH at call time so test patches are honoured.
+    if db_path is None:
+        db_path = DB_PATH
     if not db_path.exists():
         return {"error": "Database not found. Run: python3 cli.py scan"}
 
