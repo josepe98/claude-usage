@@ -13,6 +13,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 try:
@@ -59,12 +60,30 @@ class TestBrowserSmoke(unittest.TestCase):
         conn = get_db(db_path)
         init_db(conn)
 
+        # Use relative dates so fixtures always fall within the default 30-day
+        # window regardless of when the tests run.
+        now = datetime.now(timezone.utc)
+        d5 = (now - timedelta(days=5)).strftime("%Y-%m-%dT%H:%M:%SZ")   # 5 days ago
+        d5e = (now - timedelta(days=5, hours=-1, minutes=-30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        d3 = (now - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")   # 3 days ago
+        d3e = (now - timedelta(days=3, hours=-1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        d1 = (now - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")   # yesterday
+        d1e = (now - timedelta(days=1, hours=-1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        # Turn timestamps within each session day
+        d5t1 = (now - timedelta(days=5, hours=-0, minutes=-30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        d5t2 = (now - timedelta(days=5, hours=3, minutes=-15)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        d3t1 = (now - timedelta(days=3, hours=-0, minutes=-30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        d3t2 = (now - timedelta(days=3, hours=-0, minutes=-50)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        d1t1 = (now - timedelta(days=1, hours=-0, minutes=-20)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        d1t2 = (now - timedelta(days=1, hours=6, minutes=-5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
         sessions = [
             {
                 "session_id": "sess-browser-01",
                 "project_name": "user/projectalpha",
-                "first_timestamp": "2026-04-10T08:00:00Z",
-                "last_timestamp":  "2026-04-10T09:30:00Z",
+                "first_timestamp": d5,
+                "last_timestamp":  d5e,
                 "git_branch": "main",
                 "model": "claude-sonnet-4-6",
                 "total_input_tokens":   8000,
@@ -76,8 +95,8 @@ class TestBrowserSmoke(unittest.TestCase):
             {
                 "session_id": "sess-browser-02",
                 "project_name": "user/projectbeta",
-                "first_timestamp": "2026-04-12T14:00:00Z",
-                "last_timestamp":  "2026-04-12T15:00:00Z",
+                "first_timestamp": d3,
+                "last_timestamp":  d3e,
                 "git_branch": "dev",
                 "model": "claude-opus-4-7",
                 "total_input_tokens":   5000,
@@ -89,8 +108,8 @@ class TestBrowserSmoke(unittest.TestCase):
             {
                 "session_id": "sess-browser-03",
                 "project_name": "user/projectalpha",
-                "first_timestamp": "2026-04-15T10:00:00Z",
-                "last_timestamp":  "2026-04-15T11:00:00Z",
+                "first_timestamp": d1,
+                "last_timestamp":  d1e,
                 "git_branch": "feature",
                 "model": "claude-sonnet-4-6",
                 "total_input_tokens":   6000,
@@ -102,12 +121,12 @@ class TestBrowserSmoke(unittest.TestCase):
         ]
         upsert_sessions(conn, sessions)
 
-        # Turns spread across 3 dates and multiple hours
+        # Turns spread across 3 recent dates and multiple hours
         turns = [
-            # 2026-04-10: hours 8 and 11
+            # 5 days ago: two turns
             {
                 "session_id": "sess-browser-01",
-                "timestamp": "2026-04-10T08:30:00Z",
+                "timestamp": d5t1,
                 "model": "claude-sonnet-4-6",
                 "input_tokens": 700, "output_tokens": 280,
                 "cache_read_tokens": 40, "cache_creation_tokens": 15,
@@ -115,16 +134,16 @@ class TestBrowserSmoke(unittest.TestCase):
             },
             {
                 "session_id": "sess-browser-01",
-                "timestamp": "2026-04-10T11:15:00Z",
+                "timestamp": d5t2,
                 "model": "claude-sonnet-4-6",
                 "input_tokens": 600, "output_tokens": 250,
                 "cache_read_tokens": 30, "cache_creation_tokens": 10,
                 "tool_name": None, "cwd": "/tmp",
             },
-            # 2026-04-12: hour 14
+            # 3 days ago: two turns
             {
                 "session_id": "sess-browser-02",
-                "timestamp": "2026-04-12T14:30:00Z",
+                "timestamp": d3t1,
                 "model": "claude-opus-4-7",
                 "input_tokens": 900, "output_tokens": 400,
                 "cache_read_tokens": 50, "cache_creation_tokens": 20,
@@ -132,16 +151,16 @@ class TestBrowserSmoke(unittest.TestCase):
             },
             {
                 "session_id": "sess-browser-02",
-                "timestamp": "2026-04-12T14:50:00Z",
+                "timestamp": d3t2,
                 "model": "claude-opus-4-7",
                 "input_tokens": 800, "output_tokens": 350,
                 "cache_read_tokens": 45, "cache_creation_tokens": 18,
                 "tool_name": None, "cwd": "/tmp",
             },
-            # 2026-04-15: hours 10 and 16
+            # Yesterday: two turns
             {
                 "session_id": "sess-browser-03",
-                "timestamp": "2026-04-15T10:20:00Z",
+                "timestamp": d1t1,
                 "model": "claude-sonnet-4-6",
                 "input_tokens": 550, "output_tokens": 220,
                 "cache_read_tokens": 25, "cache_creation_tokens": 8,
@@ -149,7 +168,7 @@ class TestBrowserSmoke(unittest.TestCase):
             },
             {
                 "session_id": "sess-browser-03",
-                "timestamp": "2026-04-15T16:05:00Z",
+                "timestamp": d1t2,
                 "model": "claude-sonnet-4-6",
                 "input_tokens": 480, "output_tokens": 190,
                 "cache_read_tokens": 20, "cache_creation_tokens": 6,
