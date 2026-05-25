@@ -189,7 +189,11 @@ def _cost_concentration(sessions_with_cost, top_n=5):
     }
 
 
-def get_dashboard_data(db_path=DB_PATH):
+def get_dashboard_data(db_path=None):
+    # Look up DB_PATH at call time, not at def time, so tests that patch
+    # ``dashboard.DB_PATH`` (or ``scanner.DB_PATH``) are honoured.
+    if db_path is None:
+        db_path = DB_PATH
     if not db_path.exists():
         return {"error": "Database not found. Run: python cli.py scan"}
 
@@ -319,7 +323,10 @@ def get_dashboard_data(db_path=DB_PATH):
     }
 
 
-def get_session_detail(session_id, db_path=DB_PATH):
+def get_session_detail(session_id, db_path=None):
+    # Look up DB_PATH at call time so test patches are honoured.
+    if db_path is None:
+        db_path = DB_PATH
     if not db_path.exists():
         return {"error": "Database not found. Run: python3 cli.py scan"}
 
@@ -793,6 +800,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <button class="link-btn" onclick="_resetPrefs()" title="Clear saved range / model / theme preferences and reload">Reset prefs</button>
       <button id="rescan-btn" onclick="triggerRescan()" title="Rebuild the database from scratch by re-scanning all JSONL files. Use if data looks stale or costs seem wrong.">&#x21bb; Rescan</button>
     <button class="appearance-btn" onclick="window.open('/themes','_blank')">Appearance</button>
+    <select id="theme-quick" onchange="_onThemeQuickChange(this.value)" title="Quick-switch theme" style="background: var(--card); border: 1px solid var(--border); border-radius: 6px; color: var(--text); padding: 4px 8px; font-size: 12px; margin-right: 6px;"></select>
   </div>
 </header>
 
@@ -940,6 +948,28 @@ function setTheme(css, id) {
   const css = localStorage.getItem('dashboard-theme-css');
   if (css) document.getElementById('active-theme').textContent = css;
 })();
+
+async function _populateThemeDropdown() {  // eslint-disable-line no-unused-vars
+  try {
+    const sel = document.getElementById("theme-quick");
+    if (!sel) return;
+    const r = await fetch("/api/themes");
+    const themes = await r.json();
+    const current = localStorage.getItem("dashboard-theme-id") || "apple";
+    sel.innerHTML = themes.map(t =>
+      `<option value="${t.id}" ${t.id === current ? "selected" : ""}>${t.name}</option>`
+    ).join("");
+    // Cache themes for instant switching without another fetch
+    window._cachedThemes = themes;
+  } catch (e) { /* gallery / themes API not present — fine */ }
+}
+
+function _onThemeQuickChange(id) {  // eslint-disable-line no-unused-vars
+  const themes = window._cachedThemes || [];
+  const t = themes.find(x => x.id === id);
+  if (!t) return;
+  setTheme(t.css, t.id);
+}
 
 function chartColors() {
   const s = getComputedStyle(document.documentElement);
@@ -2059,7 +2089,7 @@ function scheduleAutoRefresh() {
   }
 }
 
-loadData();
+loadData(); _populateThemeDropdown();
 scheduleAutoRefresh();
 </script>
 </body>
