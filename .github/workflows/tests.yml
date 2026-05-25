@@ -16,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.number && format('refs/pull/{0}/merge', github.event.pull_request.number) || github.sha }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
@@ -32,7 +32,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.number && format('refs/pull/{0}/merge', github.event.pull_request.number) || github.sha }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Apply browser test fixtures from main
+        if: github.event_name == 'pull_request_target'
+        run: |
+          git fetch origin main --depth=1
+          git checkout origin/main -- tests/test_browser.py
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
