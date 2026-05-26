@@ -537,6 +537,90 @@ def get_session_detail(session_id, db_path=None):
     }
 
 
+def _session_detail(session_id_prefix, db_path=None):
+    """Extended drill-down payload used by the session modal.
+    Supports prefix matching on session_id and adds per-turn cost,
+    cumulative cost, and a tools breakdown — fields the canonical
+    ``get_session_detail`` doesn't expose.
+    """
+    if db_path is None:
+        db_path = DB_PATH
+    if not db_path.exists():
+        return {"error": "Database not found. Run: python3 cli.py scan"}
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    session = conn.execute("""
+        SELECT
+            session_id, project_name, first_timestamp, last_timestamp, git_branch,
+            total_input_tokens, total_output_tokens,
+            total_cache_read, total_cache_creation, model, turn_count
+        FROM sessions
+        WHERE session_id LIKE ?
+        LIMIT 1
+    """, (session_id_prefix + "%",)).fetchone()
+
+    if session is None:
+        conn.close()
+        return {"error": "Session not found"}
+
+    turn_rows = conn.execute("""
+        SELECT
+            timestamp, model, input_tokens, output_tokens,
+            cache_read_tokens, cache_creation_tokens, cache_1h_tokens, tool_name
+        FROM turns
+        WHERE session_id = ?
+        ORDER BY timestamp ASC, id ASC
+    """, (session["session_id"],)).fetchall()
+
+    from cli import calc_cost
+
+    timeline = []
+    tools_count = {}
+    cum_cost = 0.0
+    for r in turn_rows:
+        tool = r["tool_name"] or ""
+        tokens = (
+            (r["input_tokens"] or 0)
+            + (r["output_tokens"] or 0)
+            + (r["cache_read_tokens"] or 0)
+            + (r["cache_creation_tokens"] or 0)
+            + (r["cache_1h_tokens"] or 0)
+        )
+        cost = calc_cost(
+            r["model"] or "",
+            r["input_tokens"] or 0,
+            r["output_tokens"] or 0,
+            r["cache_read_tokens"] or 0,
+            r["cache_creation_tokens"] or 0,
+            r["cache_1h_tokens"] or 0,
+        )
+        cum_cost += cost
+        timeline.append({
+            "timestamp": r["timestamp"] or "",
+            "model":     r["model"] or "",
+            "tokens":    tokens,
+            "cost":      cost,
+            "cum_cost":  cum_cost,
+            "tool":      tool,
+        })
+        if tool:
+            tools_count[tool] = tools_count.get(tool, 0) + 1
+
+    conn.close()
+
+    return {
+        "session":           dict(session),
+        "turn_count_actual": len(timeline),
+        "total_cost":        cum_cost,
+        "timeline":          timeline,
+        "tools_breakdown": [
+            {"tool": t, "count": c}
+            for t, c in sorted(tools_count.items(), key=lambda kv: -kv[1])
+        ],
+    }
+
+
 GALLERY_TEMPLATE = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -2693,9 +2777,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
 
         elif path == "/api/session":
+            # Use _session_detail (prefix match + extended payload with
+            # cumulative cost, timeline, tools_breakdown) so the drill-down
+            # modal has everything it needs in one round-trip.
             parsed_url = urlparse(self.path)
             session_id = parse_qs(parsed_url.query).get("session_id", [""])[0]
-            data = get_session_detail(session_id)
+            data = _session_detail(session_id)
             body = json.dumps(data).encode("utf-8")
             self.send_response(200 if "error" not in data else 404)
             self.send_header("Content-Type", "application/json")
