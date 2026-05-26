@@ -2042,6 +2042,39 @@ async function triggerRescan() {
   setTimeout(() => { btn.textContent = '\u21bb Rescan'; btn.disabled = false; }, 3000);
 }
 
+// Keyboard shortcuts: only fire when the user isn't typing in an input.
+document.addEventListener('keydown', (e) => {
+  if (e.target && /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  switch (e.key) {
+    case '/': {
+      const inp = document.getElementById('sessions-search');
+      if (inp) { e.preventDefault(); inp.focus(); inp.select(); }
+      break;
+    }
+    case 'r': {
+      const btn = document.getElementById('rescan-btn');
+      if (btn) { e.preventDefault(); btn.click(); }
+      break;
+    }
+    case 't': {
+      // Toggle local <-> UTC for the hourly chart if the buttons exist
+      const local = document.querySelector('[data-tz="local"]');
+      const utc = document.querySelector('[data-tz="utc"]');
+      if (local && utc) {
+        e.preventDefault();
+        (local.classList.contains('active') ? utc : local).click();
+      }
+      break;
+    }
+    case '?': {
+      e.preventDefault();
+      alert('Keyboard shortcuts:\n  /  focus search\n  r  rescan database\n  t  toggle hourly TZ\n  ?  this help');
+      break;
+    }
+  }
+});
+
 // ── Data loading ───────────────────────────────────────────────────────────
 async function loadData() {
   try {
