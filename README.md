@@ -13,11 +13,33 @@ Claude Code writes detailed usage logs locally — token counts, models, session
 **This fork** ([josepe98/claude-usage](https://github.com/josepe98/claude-usage)) is actively maintained and includes bug fixes and features not yet merged upstream. PRs welcome.
 
 > **What's different here vs [phuryn/claude-usage](https://github.com/phuryn/claude-usage)**
-> - **Fixed:** Hourly chart crash — dashboard went blank when touching any filter ([#74](https://github.com/phuryn/claude-usage/issues/74))
-> - **Fixed:** Blank dashboard for users with non-standard model names ([#76](https://github.com/phuryn/claude-usage/issues/76), [#106](https://github.com/phuryn/claude-usage/issues/106))
-> - **Fixed:** Bookmarkable URLs (`?range=30d`) returning 404 ([#80](https://github.com/phuryn/claude-usage/issues/80))
-> - **Fixed:** Concurrent requests blocked — slow data loads no longer freeze the dashboard ([#78](https://github.com/phuryn/claude-usage/issues/78))
-> - **New:** Appearance gallery with 5 bundled themes (Apple, Linear, Vercel, Notion, Stripe) at `/themes`
+>
+> This fork has diverged substantially. A partial list of what's been added beyond upstream:
+>
+> **Bug fixes**
+> - Hourly chart crash — dashboard went blank when touching any filter ([#74](https://github.com/phuryn/claude-usage/issues/74))
+> - Blank dashboard for users with non-standard model names ([#76](https://github.com/phuryn/claude-usage/issues/76), [#106](https://github.com/phuryn/claude-usage/issues/106))
+> - Bookmarkable URLs (`?range=30d`) returning 404 ([#80](https://github.com/phuryn/claude-usage/issues/80))
+> - Concurrent requests blocked — slow data loads no longer freeze the dashboard ([#78](https://github.com/phuryn/claude-usage/issues/78))
+>
+> **Dashboard features**
+> - **5 bundled themes** (Apple, Linear, Vercel, Notion, Stripe) with a gallery at `/themes` and a quick-switch dropdown in the header
+> - **Session detail view** — click any session row to see its full turn history, tool usage, and working directories
+> - **Period delta badges** — each stat card shows +N%/−N% vs the prior equivalent window
+> - **Pareto cost card** — shows what share of total spend your top 5 sessions account for
+> - **Search** — filter the sessions table by project, branch, or model as you type
+> - **In-dashboard rescan** — refresh data without restarting the server
+> - **Filter state persistence** — selected date range and model filters survive page reloads
+> - **Non-billable model callout** — the Est. Cost card names any models excluded from calculations
+> - **Mobile-responsive layout** — CSS grid adapts cleanly to narrow viewports
+>
+> **Data and tracking**
+> - **Claude Desktop Cowork sessions** — audit logs from the desktop app are scanned and displayed alongside CLI sessions
+> - **Two cache tiers** — 5-minute (1.25×) and 1-hour (2.0×) prompt-cache pricing tracked separately
+> - **Streaming deduplication** — resumed or interrupted sessions don't produce duplicate turn records
+>
+> **Ops**
+> - `GET /api/health` — lightweight endpoint for Docker health checks and monitoring probes
 
 ---
 
