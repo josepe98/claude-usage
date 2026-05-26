@@ -1796,10 +1796,10 @@ function applyFilter() {
 
   // Filter sessions by model + date range + machine + search
   const filteredSessions = rawData.sessions_all.filter(s => _matchesSearch(s) &&
-    selectedModels.has(s.model)
-    && (!start || s.last_date >= start)
-    && (!end || s.last_date <= end)
-    && (!selectedMachine || s.machine_id === selectedMachine)
+    selectedModels.has(s.model) &&
+    (!start || s.last_date >= start) &&
+    (!end || s.last_date <= end) &&
+    (!selectedMachine || s.machine_id === selectedMachine)
   );
 
   // Add session counts into modelMap
