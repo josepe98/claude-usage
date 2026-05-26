@@ -35,12 +35,16 @@ class TestResetEndpoint(unittest.TestCase):
         self._orig = dashboard.DB_PATH
         dashboard.DB_PATH = self.db
         dashboard.SHARE_TOKEN = None
-        self.server = ThreadingHTTPServer(("127.0.0.1", 18098), dashboard.DashboardHandler)
+        # Bind to an OS-assigned port so concurrent runs / leaked sockets from
+        # earlier tests in the same process don't fight over a fixed port.
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), dashboard.DashboardHandler)
+        self.port = self.server.server_address[1]
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         time.sleep(0.1)
 
     def tearDown(self):
         self.server.shutdown()
+        self.server.server_close()
         dashboard.DB_PATH = self._orig
         import shutil; shutil.rmtree(self.tmp, ignore_errors=True)
 
@@ -48,7 +52,7 @@ class TestResetEndpoint(unittest.TestCase):
         # Before: 1 session
         c = sqlite3_count(self.db, "sessions")
         self.assertEqual(c, 1)
-        req = urllib.request.Request("http://127.0.0.1:18098/api/reset", method="POST")
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}/api/reset", method="POST")
         with urllib.request.urlopen(req) as r:
             d = json.loads(r.read())
         self.assertTrue(d["ok"])
