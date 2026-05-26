@@ -2174,7 +2174,9 @@ function renderDowHourHeatmap() {  // eslint-disable-line no-unused-vars
 }
 
 function _openSession(sid) {  // eslint-disable-line no-unused-vars
-  fetch("/api/session?session_id=" + encodeURIComponent(sid))
+  // Uses /api/session-detail (the extended payload) so the modal can render
+  // timeline + cumulative cost + tools breakdown in one round-trip.
+  fetch("/api/session-detail?session_id=" + encodeURIComponent(sid))
     .then(r => r.json())
     .then(d => _renderSessionModal(sid, d))
     .catch(e => alert("Could not load session: " + e));
@@ -2777,9 +2779,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
 
         elif path == "/api/session":
-            # Use _session_detail (prefix match + extended payload with
-            # cumulative cost, timeline, tools_breakdown) so the drill-down
-            # modal has everything it needs in one round-trip.
+            parsed_url = urlparse(self.path)
+            session_id = parse_qs(parsed_url.query).get("session_id", [""])[0]
+            data = get_session_detail(session_id)
+            body = json.dumps(data).encode("utf-8")
+            self.send_response(200 if "error" not in data else 404)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        elif path == "/api/session-detail":
+            # Extended drill-down payload used by the session modal:
+            # prefix matching + per-turn cost, cumulative cost, tools breakdown.
             parsed_url = urlparse(self.path)
             session_id = parse_qs(parsed_url.query).get("session_id", [""])[0]
             data = _session_detail(session_id)
