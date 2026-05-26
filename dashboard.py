@@ -870,7 +870,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     </table>
   </div>
   <div class="table-card">
-    <div class="section-header"><div class="section-title">Recent Sessions</div><button class="export-btn" onclick="exportSessionsCSV()" title="Export all filtered sessions to CSV">&#x2913; CSV</button></div>
+    <div class="section-header"><div class="section-title">Recent Sessions</div>
+      <input id="sessions-search" type="search" placeholder="Search project / branch / session…" oninput="_onSearchInput(this.value)" style="width:100%; max-width:320px; padding:6px 10px; margin: 4px 0 12px; background: var(--card); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 12px;"><button class="export-btn" onclick="exportSessionsCSV()" title="Export all filtered sessions to CSV">&#x2913; CSV</button></div>
     <div class="hint" style="margin-bottom:12px;">Click a session row for branch, tool, cwd, and turn history detail.</div>
     <table>
       <thead><tr>
@@ -1338,7 +1339,7 @@ function applyFilter() {
     }
     prevTotals.sessions = prevSessIds.size;
     prevTotals.cost = prevDaily.reduce(
-      (acc, r) => acc + calcCost(r.model, r.input, r.output, r.cache_read, r.cache_creation),
+      (acc, r) => acc + calcCost(r.model, r.input, r.output, r.cache_read, r.cache_creation, r.cache_1h),
       0,
     );
   }
@@ -1368,7 +1369,7 @@ function applyFilter() {
   }
 
   // Filter sessions by model + date range
-  const filteredSessions = rawData.sessions_all.filter(s =>
+  const filteredSessions = rawData.sessions_all.filter(s => _matchesSearch(s) &&
     selectedModels.has(s.model) && (!start || s.last_date >= start) && (!end || s.last_date <= end)
   );
 
@@ -1769,6 +1770,18 @@ function renderPareto(filteredSessions) {  // eslint-disable-line no-unused-vars
   el.innerHTML = `<strong>Cost concentration:</strong> top 5 sessions account for <strong>${pct}%</strong> of spend in the current range. <span style="color:var(--muted)">(${names})</span>`;
 }
 
+let _searchTerm = "";
+function _onSearchInput(v) {  // eslint-disable-line no-unused-vars
+  _searchTerm = (v || "").toLowerCase();
+  applyFilter();  // re-render with the new filter
+}
+
+function _matchesSearch(s) {
+  if (!_searchTerm) return true;
+  const fields = [s.project, s.branch, s.session_id, s.session_name, s.model].filter(Boolean);
+  return fields.some(f => String(f).toLowerCase().includes(_searchTerm));
+}
+
 function renderProjectChart(byProject) {
   const top = byProject.slice(0, 10);
   const ctx = document.getElementById('chart-project').getContext('2d');
@@ -2021,20 +2034,7 @@ async function triggerRescan() {
     const resp = await fetch('/api/rescan', { method: 'POST' });
     const d = await resp.json();
     btn.textContent = '\u21bb Rescan (' + d.new + ' new, ' + d.updated + ' updated)';
-    await 
-
-// Apply localStorage prefs at startup if URL didn't carry any.
-(function bootstrapPrefs() {
-  try {
-    if (window.location.search) return;  // URL takes precedence
-    const p = _loadPrefs();
-    if (Array.isArray(p.models) && p.models.length) {
-      selectedModels = new Set(p.models);
-    }
-  } catch (e) {}
-})();
-
-loadData();
+    await loadData();
   } catch(e) {
     btn.textContent = '\u21bb Rescan (error)';
     console.error(e);
@@ -2088,6 +2088,17 @@ function scheduleAutoRefresh() {
     autoRefreshTimer = setInterval(loadData, 30000);
   }
 }
+
+// Apply localStorage prefs at startup if URL didn't carry any.
+(function bootstrapPrefs() {
+  try {
+    if (window.location.search) return;  // URL takes precedence
+    const p = _loadPrefs();
+    if (Array.isArray(p.models) && p.models.length) {
+      selectedModels = new Set(p.models);
+    }
+  } catch (e) {}
+})();
 
 loadData(); _populateThemeDropdown();
 scheduleAutoRefresh();
