@@ -20,7 +20,7 @@ class TestDockerSetup(unittest.TestCase):
     def test_compose_mounts_claude_home(self):
         compose = (ROOT / "compose.yaml").read_text()
         self.assertTrue(
-            re.search(r"(~|\$HOME|\$\{HOME\})/\.claude", compose),
+            re.search(r"(~|\$HOME|\$\{HOME[^}]*\})/\.claude", compose),
             f"compose.yaml must bind-mount ~/.claude; got:\n{compose}",
         )
 
