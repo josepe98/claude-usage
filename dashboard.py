@@ -5,12 +5,27 @@ dashboard.py - Local web dashboard served on localhost:8080.
 import json
 import os
 import sqlite3
+import subprocess
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 from pathlib import Path
 
 from pricing import PRICING
 from datetime import datetime
+
+def _git_short_hash():
+    """Return the short commit hash of HEAD, or None if git is unavailable."""
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=Path(__file__).parent,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip() or None
+    except Exception:
+        return None
+
+GIT_HASH = _git_short_hash()
 
 DB_PATH    = Path.home() / ".claude" / "usage.db"
 THEMES_DIR = Path.home() / ".claude" / "claude-usage" / "themes"
@@ -779,7 +794,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   #rescan-btn:hover { color: var(--text); border-color: var(--accent); }
   #rescan-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
-  #filter-bar { background: rgba(255,255,255,0.85); backdrop-filter: saturate(180%) blur(20px); -webkit-backdrop-filter: saturate(180%) blur(20px); border-bottom: 1px solid var(--border); padding: 10px 24px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  #filter-bar { background: rgba(255,255,255,0.85); backdrop-filter: saturate(180%) blur(20px); -webkit-backdrop-filter: saturate(180%) blur(20px); border-bottom: 1px solid var(--border); padding: 10px 24px; display: flex; flex-direction: column; gap: 8px; }
+  .filter-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .filter-label { font-size: 12px; font-weight: 600; letter-spacing: -0.12px; color: var(--muted); white-space: nowrap; }
   .filter-sep { width: 1px; height: 22px; background: rgba(0,0,0,0.12); flex-shrink: 0; }
   #model-checkboxes { display: flex; flex-wrap: wrap; gap: 6px; }
@@ -881,7 +897,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     .container { padding: 16px 12px; }
     .header-bar { flex-direction: column; align-items: flex-start; gap: 8px; }
     .header-bar > div, .header-bar > h1 { width: 100%; }
-    .filter-bar { flex-direction: column; align-items: stretch; gap: 12px; }
+    .filter-row { flex-wrap: wrap; }
     .range-group { overflow-x: auto; -webkit-overflow-scrolling: touch; white-space: nowrap; }
     .range-btn { flex-shrink: 0; padding: 6px 10px; }
     #stats-row { grid-template-columns: repeat(2, 1fr) !important; gap: 8px; }
@@ -909,21 +925,24 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 </header>
 
 <div id="filter-bar">
-  <div class="filter-label">Models</div>
-  <div id="model-checkboxes"></div>
-  <button class="filter-btn" onclick="selectAllModels()">All</button>
-  <button class="filter-btn" onclick="clearAllModels()">None</button>
-  <div class="filter-sep"></div>
-  <div class="filter-label">Range</div>
-  <div class="range-group">
-    <button class="range-btn" data-range="today" onclick="setRange('today')">Today</button>
-    <button class="range-btn" data-range="week" onclick="setRange('week')">This Week</button>
-    <button class="range-btn" data-range="month" onclick="setRange('month')">This Month</button>
-    <button class="range-btn" data-range="prev-month" onclick="setRange('prev-month')">Prev Month</button>
-    <button class="range-btn" data-range="7d"  onclick="setRange('7d')">7d</button>
-    <button class="range-btn" data-range="30d" onclick="setRange('30d')">30d</button>
-    <button class="range-btn" data-range="90d" onclick="setRange('90d')">90d</button>
-    <button class="range-btn" data-range="all" onclick="setRange('all')">All</button>
+  <div class="filter-row">
+    <div class="filter-label">Models</div>
+    <div id="model-checkboxes"></div>
+    <button class="filter-btn" onclick="selectAllModels()">All</button>
+    <button class="filter-btn" onclick="clearAllModels()">None</button>
+  </div>
+  <div class="filter-row">
+    <div class="filter-label">Range</div>
+    <div class="range-group">
+      <button class="range-btn" data-range="today" onclick="setRange('today')">Today</button>
+      <button class="range-btn" data-range="week" onclick="setRange('week')">This Week</button>
+      <button class="range-btn" data-range="month" onclick="setRange('month')">This Month</button>
+      <button class="range-btn" data-range="prev-month" onclick="setRange('prev-month')">Prev Month</button>
+      <button class="range-btn" data-range="7d"  onclick="setRange('7d')">7d</button>
+      <button class="range-btn" data-range="30d" onclick="setRange('30d')">30d</button>
+      <button class="range-btn" data-range="90d" onclick="setRange('90d')">90d</button>
+      <button class="range-btn" data-range="all" onclick="setRange('all')">All</button>
+    </div>
   </div>
 </div>
 
@@ -1037,11 +1056,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <div class="footer-content">
     <p>Cost estimates based on Anthropic API pricing (<a href="https://claude.com/pricing#api" target="_blank">claude.com/pricing#api</a>) as of April 2026. Only models containing <em>opus</em>, <em>sonnet</em>, or <em>haiku</em> in the name are included in cost calculations. Actual costs for Max/Pro subscribers differ from API pricing.</p>
     <p>
-      GitHub: <a href="https://github.com/phuryn/claude-usage" target="_blank">https://github.com/phuryn/claude-usage</a>
+      GitHub: <a href="https://github.com/josepe98/claude-usage" target="_blank">josepe98/claude-usage</a>
       &nbsp;&middot;&nbsp;
-      Created by: <a href="https://www.productcompass.pm" target="_blank">The Product Compass Newsletter</a>
+      Originally by: <a href="https://www.productcompass.pm" target="_blank">The Product Compass Newsletter</a>
       &nbsp;&middot;&nbsp;
       License: MIT
+      {git_hash_html}
     </p>
   </div>
 </footer>
@@ -2326,9 +2346,15 @@ scheduleAutoRefresh();
 def render_html():
     """Inject the Python PRICING table into the HTML so the JS table
     can never drift from the Python one."""
-    return HTML_TEMPLATE.replace(
-        "/*__PRICING_JSON__*/",
-        json.dumps(PRICING),
+    git_hash_html = (
+        f'&nbsp;&middot;&nbsp;<a href="https://github.com/josepe98/claude-usage/commit/{GIT_HASH}" '
+        f'target="_blank"><code>{GIT_HASH}</code></a>'
+        if GIT_HASH else ""
+    )
+    return (
+        HTML_TEMPLATE
+        .replace("/*__PRICING_JSON__*/", json.dumps(PRICING))
+        .replace("{git_hash_html}", git_hash_html)
     ).encode("utf-8")
 
 
