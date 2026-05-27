@@ -22,7 +22,7 @@ class TestLocalStoragePrefs(unittest.TestCase):
         self.assertIn("_savePrefs({ range: range })", dashboard.HTML_TEMPLATE)
 
     def test_setHourlyTZ_writes_through(self):
-        self.assertIn("_savePrefs({ hourlyTZ: tz })", dashboard.HTML_TEMPLATE)
+        self.assertIn("_savePrefs({ hourlyTZ: mode })", dashboard.HTML_TEMPLATE)
 
     def test_models_write_through(self):
         self.assertIn("models: Array.from(selectedModels)", dashboard.HTML_TEMPLATE)

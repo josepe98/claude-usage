@@ -956,7 +956,15 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <div class="chart-wrap tall"><canvas id="chart-daily"></canvas></div>
     </div>
     <div class="chart-card wide">
-      <h2>Activity by Day-of-Week × Hour (UTC)</h2>
+      <div class="chart-header">
+        <h2 id="dow-hour-title">Activity by Day-of-Week × Hour</h2>
+        <div class="chart-header-right">
+          <div class="tz-group">
+            <button class="tz-btn" data-tz="local" onclick="setHourlyTZ('local')">Local</button>
+            <button class="tz-btn" data-tz="utc"   onclick="setHourlyTZ('utc')">UTC</button>
+          </div>
+        </div>
+      </div>
       <div id="dow-hour-grid" style="display: grid; grid-template-columns: 30px repeat(24, 1fr); gap: 2px; font-size: 10px; color: var(--muted);"></div>
     </div>
 
@@ -1332,7 +1340,7 @@ function setRange(range) {
 }
 
 function setHourlyTZ(mode) {
-  _savePrefs({ hourlyTZ: tz });
+  _savePrefs({ hourlyTZ: mode });
   hourlyTZ = mode;
   document.querySelectorAll('.tz-btn').forEach(btn =>
     btn.classList.toggle('active', btn.dataset.tz === mode)
@@ -1949,10 +1957,32 @@ function renderDowHourHeatmap() {  // eslint-disable-line no-unused-vars
   const grid = rawData && rawData.dow_hour;
   const el = document.getElementById("dow-hour-grid");
   if (!el || !grid) return;
+
+  // Remap UTC grid into display grid based on current TZ setting
+  const offset = hourlyTZ === 'local' ? localOffsetHours() : 0;
+  const display = Array.from({length: 7}, () =>
+    Array.from({length: 24}, () => ({turns: 0, tokens: 0}))
+  );
+  for (let d = 0; d < 7; d++) {
+    for (let h = 0; h < 24; h++) {
+      const dispH = (h + offset + 24) % 24;
+      const dayShift = Math.floor((h + offset) / 24); // -1, 0, or +1
+      const dispD = (d + dayShift + 7) % 7;
+      display[dispD][dispH].turns  += grid[d][h].turns;
+      display[dispD][dispH].tokens += grid[d][h].tokens;
+    }
+  }
+
+  // Update heading to reflect current TZ
+  const titleEl = document.getElementById("dow-hour-title");
+  if (titleEl) titleEl.textContent = `Activity by Day-of-Week × Hour (${tzDisplayName(hourlyTZ)})`;
+
   // Find max for colour scaling
   let max = 0;
-  for (let d = 0; d < 7; d++) for (let h = 0; h < 24; h++) max = Math.max(max, grid[d][h].turns);
+  for (let d = 0; d < 7; d++) for (let h = 0; h < 24; h++) max = Math.max(max, display[d][h].turns);
+
   const days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+  const tzLabel = tzDisplayName(hourlyTZ);
   const cells = [];
   // Top-left empty corner + hour header
   cells.push(`<div></div>`);
@@ -1962,10 +1992,10 @@ function renderDowHourHeatmap() {  // eslint-disable-line no-unused-vars
   for (let d = 0; d < 7; d++) {
     cells.push(`<div style="text-align:right;padding-right:4px;color:var(--text);">${days[d]}</div>`);
     for (let h = 0; h < 24; h++) {
-      const v = grid[d][h];
+      const v = display[d][h];
       const intensity = max > 0 ? v.turns / max : 0;
       const bg = `rgba(217,119,87,${0.05 + intensity * 0.85})`;
-      const title = `${days[d]} ${h}:00 UTC — ${v.turns} turns, ${(v.tokens||0).toLocaleString()} tokens`;
+      const title = `${days[d]} ${h}:00 ${tzLabel} — ${v.turns} turns, ${(v.tokens||0).toLocaleString()} tokens`;
       cells.push(`<div style="aspect-ratio:1/1;background:${bg};border-radius:2px;" title="${title}"></div>`);
     }
   }
