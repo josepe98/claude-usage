@@ -931,6 +931,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .section-header .section-title { margin-bottom: 0; }
   .export-btn { background: var(--card); border: 1px solid var(--border); color: var(--muted); padding: 3px 10px; border-radius: 5px; cursor: pointer; font-size: 11px; }
   .export-btn:hover { color: var(--text); border-color: var(--accent); }
+  .md-btn { background: var(--card); border: 1px solid var(--border); color: var(--muted); padding: 3px 10px; border-radius: 5px; cursor: pointer; font-size: 11px; margin-right: 6px; }
+  .md-btn:hover { color: var(--text); border-color: var(--accent); }
+  .section-actions { display: inline-flex; align-items: center; gap: 0; }
+  .md-toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(20px); background: var(--card); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 10px 16px; font-size: 13px; box-shadow: var(--shadow); opacity: 0; pointer-events: none; transition: opacity 200ms ease, transform 200ms ease; z-index: 9999; }
+  .md-toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
   .table-card { background: var(--card); border-radius: var(--card-radius); border: var(--card-border); padding: 20px; margin-bottom: 24px; overflow-x: auto; box-shadow: var(--shadow); }
 
   footer { border-top: 1px solid var(--border); padding: 20px 24px; margin-top: 8px; }
@@ -1060,8 +1065,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     </div>
   </div>
   <div class="table-card">
-    <div class="section-title">Cost by Model</div>
-    <table>
+    <div class="section-header"><div class="section-title">Cost by Model</div><div class="section-actions"><button class="md-btn" onclick="copyModelMD()" title="Copy table as markdown">&#x1f4cb; MD</button></div></div>
+    <table id="model-cost-table">
       <thead><tr>
         <th>Model</th>
         <th class="sortable" onclick="setModelSort('turns')">Turns <span class="sort-icon" id="msort-turns"></span></th>
@@ -1075,10 +1080,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     </table>
   </div>
   <div class="table-card">
-    <div class="section-header"><div class="section-title">Recent Sessions</div>
-      <input id="sessions-search" type="search" placeholder="Search project / branch / session…" oninput="_onSearchInput(this.value)" style="width:100%; max-width:320px; padding:6px 10px; margin: 4px 0 12px; background: var(--card); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 12px;"><button class="export-btn" onclick="exportSessionsCSV()" title="Export all filtered sessions to CSV">&#x2913; CSV</button></div>
+    <div class="section-header"><div class="section-title">Recent Sessions</div><div class="section-actions"><input id="sessions-search" type="search" placeholder="Search project / branch / session…" oninput="_onSearchInput(this.value)" style="width:100%; max-width:320px; padding:6px 10px; background: var(--card); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 12px;"><button class="md-btn" onclick="copySessionsMD()" title="Copy table as markdown">&#x1f4cb; MD</button><button class="export-btn" onclick="exportSessionsCSV()" title="Export all filtered sessions to CSV">&#x2913; CSV</button></div></div>
     <div class="hint" style="margin-bottom:12px;">Click a session row for branch, tool, cwd, and turn history detail.</div>
-    <table>
+    <table id="sessions-table">
       <thead><tr>
         <th>Session</th>
         <th>Project</th>
@@ -1098,8 +1102,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <div id="session-detail"></div>
   </div>
   <div class="table-card">
-    <div class="section-header"><div class="section-title">Cost by Project</div><button class="export-btn" onclick="exportProjectsCSV()" title="Export all projects to CSV">&#x2913; CSV</button></div>
-    <table>
+    <div class="section-header"><div class="section-title">Cost by Project</div><div class="section-actions"><button class="md-btn" onclick="copyProjectsMD()" title="Copy table as markdown">&#x1f4cb; MD</button><button class="export-btn" onclick="exportProjectsCSV()" title="Export all projects to CSV">&#x2913; CSV</button></div></div>
+    <table id="project-cost-table">
       <thead><tr>
         <th>Project</th>
         <th class="sortable" onclick="setProjectSort('sessions')">Sessions <span class="sort-icon" id="psort-sessions"></span></th>
@@ -1112,8 +1116,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     </table>
   </div>
   <div class="table-card">
-    <div class="section-header"><div class="section-title">Cost by Project &amp; Branch</div><button class="export-btn" onclick="exportProjectBranchCSV()" title="Export project+branch breakdown to CSV">&#x2913; CSV</button></div>
-    <table>
+    <div class="section-header"><div class="section-title">Cost by Project &amp; Branch</div><div class="section-actions"><button class="md-btn" onclick="copyProjectBranchMD()" title="Copy table as markdown">&#x1f4cb; MD</button><button class="export-btn" onclick="exportProjectBranchCSV()" title="Export project+branch breakdown to CSV">&#x2913; CSV</button></div></div>
+    <table id="project-branch-cost-table">
       <thead><tr>
         <th>Project</th>
         <th>Branch</th>
@@ -1127,6 +1131,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     </table>
   </div>
 </div>
+
+<div id="md-toast" class="md-toast" role="status" aria-live="polite">Copied as markdown!</div>
 
 <footer>
   <div class="footer-content">
@@ -1248,6 +1254,7 @@ let branchSortDir = 'desc';
 let lastFilteredSessions = [];
 let lastByProject = [];
 let lastByProjectBranch = [];
+let lastByModel = [];
 let sessionSortDir = 'desc';
 let hourlyTZ = (_loadPrefs().hourlyTZ) || 'local';  // 'local' or 'utc'
 
@@ -1680,6 +1687,7 @@ function applyFilter() {
   lastFilteredSessions = sortSessions(filteredSessions);
   lastByProject = sortProjects(byProject);
   lastByProjectBranch = sortProjectBranch(byProjectBranch);
+  lastByModel = sortModels(byModel);
   renderSessionsTable(lastFilteredSessions.slice(0, 20));
   renderModelCostTable(byModel);
   renderProjectCostTable(lastByProject.slice(0, 20));
@@ -2312,6 +2320,102 @@ function exportProjectBranchCSV() {
     return [pb.project, pb.branch, pb.sessions, pb.turns, pb.input, pb.output, pb.cache_read, pb.cache_creation, pb.cost.toFixed(4)];
   });
   downloadCSV('projects_by_branch', header, rows);
+}
+
+// ── Markdown copy ─────────────────────────────────────────────────────────
+function _mdEscape(v) {
+  // Pipes and newlines break GFM tables; replace them.
+  return String(v == null ? '' : v).replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
+}
+
+function _tableToMarkdown(tableId, headers, rowsData) {
+  // tableId is accepted for traceability / debug; rendering uses headers+rowsData.
+  const head = '| ' + headers.map(_mdEscape).join(' | ') + ' |';
+  const sep  = '|' + headers.map(() => '---').join('|') + '|';
+  const body = rowsData.map(r => '| ' + r.map(_mdEscape).join(' | ') + ' |').join('\n');
+  const md   = body ? head + '\n' + sep + '\n' + body : head + '\n' + sep;
+  return md;
+}
+
+function _copyToClipboard(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    return navigator.clipboard.writeText(text).then(
+      () => true,
+      () => _fallbackCopy(text)
+    );
+  }
+  return Promise.resolve(_fallbackCopy(text));
+}
+
+function _fallbackCopy(text) {
+  // Older browsers: textarea + execCommand('copy')
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'absolute';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    return ok;
+  } catch (e) {
+    return false;
+  }
+}
+
+let _toastTimer = null;
+function _showToast(msg) {
+  const el = document.getElementById('md-toast');
+  if (!el) return;
+  el.textContent = msg || 'Copied as markdown!';
+  el.classList.add('show');
+  if (_toastTimer) clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(() => { el.classList.remove('show'); }, 2000);
+}
+
+function _copyMD(tableId, headers, rowsData) {
+  const md = _tableToMarkdown(tableId, headers, rowsData);
+  Promise.resolve(_copyToClipboard(md)).then(ok => {
+    _showToast(ok === false ? 'Copy failed' : 'Copied as markdown!');
+  });
+}
+
+function copyModelMD() {
+  const headers = ['Model', 'Turns', 'Input', 'Output', 'Cache Read', 'Cache Creation', 'Est. Cost'];
+  const rows = (lastByModel || []).map(m => {
+    const cost = calcCost(m.model, m.input, m.output, m.cache_read, m.cache_creation, m.cache_1h);
+    return [m.model, m.turns, m.input, m.output, m.cache_read, m.cache_creation,
+      isBillable(m.model) ? '$' + cost.toFixed(4) : 'n/a'];
+  });
+  _copyMD('model-cost-table', headers, rows);
+}
+
+function copySessionsMD() {
+  const headers = ['Session', 'Project', 'Last Active', 'Duration (min)', 'Model', 'Turns', 'Input', 'Output', 'Est. Cost'];
+  const rows = (lastFilteredSessions || []).map(sess => {
+    const cost = calcCost(sess.model, sess.input, sess.output, sess.cache_read, sess.cache_creation, sess.cache_1h);
+    return [sess.session_name || sess.session_id, sess.project, sess.last, sess.duration_min,
+      sess.model, sess.turns, sess.input, sess.output, '$' + cost.toFixed(4)];
+  });
+  _copyMD('sessions-table', headers, rows);
+}
+
+function copyProjectsMD() {
+  const headers = ['Project', 'Sessions', 'Turns', 'Input', 'Output', 'Est. Cost'];
+  const rows = (lastByProject || []).map(pr => {
+    return [pr.project, pr.sessions, pr.turns, pr.input, pr.output, '$' + pr.cost.toFixed(4)];
+  });
+  _copyMD('project-cost-table', headers, rows);
+}
+
+function copyProjectBranchMD() {
+  const headers = ['Project', 'Branch', 'Sessions', 'Turns', 'Input', 'Output', 'Est. Cost'];
+  const rows = (lastByProjectBranch || []).map(pb => {
+    return [pb.project, pb.branch, pb.sessions, pb.turns, pb.input, pb.output, '$' + pb.cost.toFixed(4)];
+  });
+  _copyMD('project-branch-cost-table', headers, rows);
 }
 
 // ── Rescan ────────────────────────────────────────────────────────────────
