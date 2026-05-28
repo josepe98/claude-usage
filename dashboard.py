@@ -285,7 +285,7 @@ def _compute_streak(conn, today=None):
     ignored so a bad clock can't inflate the streak. Returns 0 when there's
     no activity today (the streak only counts unbroken runs anchored at
     today). ``today`` is injectable for tests; defaults to UTC date now."""
-    today = today or datetime.utcnow().date()
+    today = today or datetime.now().date()
     today_iso = today.isoformat()
     rows = conn.execute(
         """
