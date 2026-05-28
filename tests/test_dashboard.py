@@ -437,20 +437,26 @@ class TestHTMLTemplate(unittest.TestCase):
         self.assertIn('[12, 13, 14, 15, 16, 17]', HTML_TEMPLATE)
 
     def test_range_filter_uses_bounds_for_all_filtered_data(self):
-        """Regression for GH#88: range filtering must not reference undefined variables."""
-        apply_filter = self._extract_js_function("applyFilter")
+        """Regression for GH#88: range filtering must not reference undefined variables.
 
-        bounds_decl = apply_filter.index("const { start, end } = getRangeBounds(selectedRange);")
-        daily_filter = apply_filter.index("rawData.daily_by_model.filter")
-        sessions_filter = apply_filter.index("rawData.sessions_all.filter")
-        hourly_filter = apply_filter.index("rawData.hourly_by_model || []")
+        After the A/B compare refactor, the per-period aggregation lives in
+        ``computePeriod(range)`` (and ``applyFilter`` just orchestrates two
+        calls when in compare mode), so the regression check moves into that
+        helper.
+        """
+        compute_period = self._extract_js_function("computePeriod")
+
+        bounds_decl = compute_period.index("const { start, end } = getRangeBounds(range);")
+        daily_filter = compute_period.index("rawData.daily_by_model.filter")
+        sessions_filter = compute_period.index("rawData.sessions_all.filter")
+        hourly_filter = compute_period.index("rawData.hourly_by_model || []")
 
         self.assertLess(bounds_decl, daily_filter)
         self.assertLess(bounds_decl, sessions_filter)
         self.assertLess(bounds_decl, hourly_filter)
-        self.assertNotRegex(apply_filter, r"\bcutoff\b")
+        self.assertNotRegex(compute_period, r"\bcutoff\b")
         for filter_start in [daily_filter, sessions_filter, hourly_filter]:
-            filter_block = apply_filter[filter_start:filter_start + 180]
+            filter_block = compute_period[filter_start:filter_start + 180]
             self.assertIn("!start", filter_block)
             self.assertIn("!end", filter_block)
 
