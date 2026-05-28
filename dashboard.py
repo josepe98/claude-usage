@@ -306,6 +306,81 @@ def _compute_streak(conn, today=None):
     return streak
 
 
+def _daily_cost_history(conn, days_back=60):
+    """Return [(day, cost_usd, tokens_in, tokens_out)] for the last N days.
+    Cost uses the current PRICING table; this is intentionally an estimate
+    (Anthropic's actual billing follows historical pricing) but matches what
+    the dashboard otherwise shows."""
+    from pricing import get_pricing
+    from datetime import datetime as _dt, timedelta as _td
+    cutoff = (_dt.utcnow() - _td(days=days_back)).strftime("%Y-%m-%d")
+    rows = conn.execute("""
+        SELECT date(timestamp) as day, model,
+               SUM(input_tokens)          as inp,
+               SUM(output_tokens)         as out,
+               SUM(cache_read_tokens)     as cr,
+               SUM(cache_creation_tokens) as cw
+        FROM turns
+        WHERE timestamp IS NOT NULL AND date(timestamp) >= ?
+        GROUP BY day, model
+        ORDER BY day ASC
+    """, (cutoff,)).fetchall()
+    by_day = {}
+    for r in rows:
+        p = get_pricing(r["model"])
+        if not p:
+            continue
+        c = ((r["inp"] or 0) * p["input"]
+             + (r["out"] or 0) * p["output"]
+             + (r["cr"] or 0) * p["cache_read"]
+             + (r["cw"] or 0) * p["cache_write"]) / 1_000_000
+        d = by_day.setdefault(r["day"], {"day": r["day"], "cost": 0.0, "tokens": 0})
+        d["cost"] += c
+        d["tokens"] += (r["inp"] or 0) + (r["out"] or 0)
+    return sorted(by_day.values(), key=lambda x: x["day"])
+
+
+def _forecast(history):
+    """Simple lagging-average forecast. Returns dict with avg_7d, avg_30d,
+    projected_month_end, trend ('up'|'down'|'flat')."""
+    if not history:
+        return {"avg_7d": 0.0, "avg_30d": 0.0,
+                "projected_month_end": 0.0, "trend": "flat",
+                "days_in_data": 0}
+    last7  = history[-7:]
+    last30 = history[-30:]
+    avg7   = sum(d["cost"] for d in last7)  / max(len(last7), 1)
+    avg30  = sum(d["cost"] for d in last30) / max(len(last30), 1)
+    # Project to end of the current calendar month using avg7.
+    from datetime import date as _date, timedelta as _td
+    today = _date.today()
+    # Last day of current month
+    if today.month == 12:
+        next_month = _date(today.year + 1, 1, 1)
+    else:
+        next_month = _date(today.year, today.month + 1, 1)
+    days_left = (next_month - today).days
+    month_so_far = sum(
+        d["cost"] for d in history
+        if d["day"][:7] == today.strftime("%Y-%m")
+    )
+    projected = month_so_far + avg7 * days_left
+    if avg30 > 0:
+        ratio = avg7 / avg30
+        trend = "up" if ratio > 1.1 else "down" if ratio < 0.9 else "flat"
+    else:
+        trend = "flat"
+    return {
+        "avg_7d":  round(avg7, 2),
+        "avg_30d": round(avg30, 2),
+        "month_to_date": round(month_so_far, 2),
+        "projected_month_end": round(projected, 2),
+        "days_left_in_month": days_left,
+        "trend": trend,
+        "days_in_data": len(history),
+    }
+
+
 def get_dashboard_data(db_path=None):
     # Look up DB_PATH at call time, not at def time, so tests that patch
     # ``dashboard.DB_PATH`` (or ``scanner.DB_PATH``) are honoured.
@@ -455,6 +530,7 @@ def get_dashboard_data(db_path=None):
     for s in sessions_all:
         s["tags"] = _tags_map.get(s["session_id"], [])
     streak = _compute_streak(conn)
+    forecast = _forecast(_daily_cost_history(conn))
     conn.close()
 
     return {
@@ -465,6 +541,7 @@ def get_dashboard_data(db_path=None):
         "plan_recommendation": plan_recommendation,
         "dow_hour":        dow_hour,
         "streak":          streak,
+        "forecast":           forecast,
         "generated_at":       datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
@@ -1947,6 +2024,23 @@ function _deltaBadge(curr, prev) {
   return ` <span class="delta ${cls}">${sign}${pct.toFixed(0)}%</span>`;
 }
 
+function _f() { return (rawData && rawData.forecast) || null; }
+function forecastValue() {
+  const f = _f();
+  if (!f || !f.days_in_data) return 'n/a';
+  return fmtCostBig(f.projected_month_end || 0);
+}
+function forecastSub() {
+  const f = _f();
+  if (!f || !f.days_in_data) return 'no spend data yet';
+  const arrow = f.trend === 'up' ? '\u2191' : f.trend === 'down' ? '\u2193' : '\u2192';
+  return arrow + ' ' + fmtCostBig(f.avg_7d) + '/day (7d) \u2022 ' + f.days_left_in_month + 'd left in month';
+}
+function forecastColor() {
+  const f = _f();
+  if (!f) return '';
+  return f.trend === 'up' ? '#f87171' : f.trend === 'down' ? '#4ade80' : '';
+}
 function renderStats(t, prev) {
   const rangeLabel = RANGE_LABELS[selectedRange].toLowerCase();
   const stats = [
@@ -1957,6 +2051,7 @@ function renderStats(t, prev) {
     { label: 'Cache Read',     value: fmt(t.cache_read),           sub: 'from prompt cache',      delta: prev && _deltaBadge(t.cache_read, prev.cache_read) },
     { label: 'Cache Creation', value: fmt(t.cache_creation),       sub: 'writes to prompt cache', delta: prev && _deltaBadge(t.cache_creation, prev.cache_creation) },
     { label: 'Est. Cost',      value: fmtCostBig(t.cost),          sub: _costSub(t), color: '#4ade80', title: _costTitle(t), delta: prev && _deltaBadge(t.cost, prev.cost) },
+    { label: 'Forecast',       value: forecastValue(),             sub: forecastSub(),            color: forecastColor() },
   ];
   document.getElementById('stats-row').innerHTML = stats.map(s => `
     <div class="stat-card" title="${s.title ? esc(s.title) : ''}">
