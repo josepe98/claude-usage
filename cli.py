@@ -635,8 +635,13 @@ def cmd_completions(shell=_COMPLETIONS_SENTINEL):
         shell = sys.argv[2] if len(sys.argv) > 2 else None
 
     if not shell:
-        print("Usage: python3 cli.py completions <bash|zsh|fish>", file=sys.stderr)
-        sys.exit(2)
+        import os
+        detected = os.path.basename(os.environ.get("SHELL", "")).lower()
+        if detected in ("bash", "zsh", "fish"):
+            shell = detected
+        else:
+            print("Usage: python3 cli.py completions <bash|zsh|fish>", file=sys.stderr)
+            sys.exit(2)
 
     shell = shell.lower()
     commands = sorted(COMMANDS.keys())
