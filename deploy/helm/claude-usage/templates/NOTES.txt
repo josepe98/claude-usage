@@ -1,0 +1,44 @@
+claude-usage has been deployed.
+
+1. Reach the dashboard:
+
+{{- if .Values.ingress.enabled }}
+{{- range $host := .Values.ingress.hosts }}
+  {{- range .paths }}
+  http{{ if $.Values.ingress.tls }}s{{ end }}://{{ $host.host }}{{ .path }}
+  {{- end }}
+{{- end }}
+{{- else if contains "NodePort" .Values.service.type }}
+  export NODE_PORT=$(kubectl get --namespace {{ .Release.Namespace }} -o jsonpath="{.spec.ports[0].nodePort}" services {{ include "claude-usage.fullname" . }})
+  export NODE_IP=$(kubectl get nodes --namespace {{ .Release.Namespace }} -o jsonpath="{.items[0].status.addresses[0].address}")
+  echo "Dashboard: http://$NODE_IP:$NODE_PORT"
+{{- else if contains "LoadBalancer" .Values.service.type }}
+  NOTE: It may take a few minutes for the LoadBalancer IP to be available.
+        Watch the status with:
+        kubectl get --namespace {{ .Release.Namespace }} svc -w {{ include "claude-usage.fullname" . }}
+
+  export SERVICE_IP=$(kubectl get svc --namespace {{ .Release.Namespace }} {{ include "claude-usage.fullname" . }} --template "{{ "{{ range (index .status.loadBalancer.ingress 0) }}{{ . }}{{ end }}" }}")
+  echo "Dashboard: http://$SERVICE_IP:{{ .Values.service.port }}"
+{{- else }}
+  # ClusterIP - port-forward to reach the dashboard from your machine:
+  kubectl --namespace {{ .Release.Namespace }} port-forward svc/{{ include "claude-usage.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+  echo "Then open http://127.0.0.1:{{ .Values.service.port }}"
+{{- end }}
+
+2. Populate the database. The dashboard reads ~/.claude/usage.db; rebuild it from
+   transcript JSONL files by running the scan command inside the pod:
+
+   kubectl --namespace {{ .Release.Namespace }} exec deploy/{{ include "claude-usage.fullname" . }} -- python cli.py scan
+
+   Or run it as a one-shot Job - see deploy/helm/README.md for an example.
+
+{{- if .Values.persistence.enabled }}
+
+3. The PVC "{{ include "claude-usage.pvcName" . }}" (size {{ .Values.persistence.size }}) is mounted
+   at {{ .Values.persistence.mountPath }}. Drop your existing ~/.claude/projects/ JSONL files there
+   (e.g. via kubectl cp) and run the scan command above to populate usage.db.
+{{- else }}
+
+3. Persistence is DISABLED - data will be lost when the pod restarts. Enable it via
+   --set persistence.enabled=true if you want the SQLite database to survive restarts.
+{{- end }}
