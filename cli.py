@@ -204,6 +204,28 @@ def cmd_week():
     conn.close()
 
 
+def cmd_budget(amount=None, clear=False):
+    """Get/set/clear the monthly budget cap."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from dashboard import _load_budget, _save_budget
+    cfg = _load_budget()
+    if clear:
+        cfg.pop("monthly_usd", None)
+        _save_budget(cfg)
+        print("Budget cleared.")
+        return
+    if amount is not None:
+        cfg["monthly_usd"] = float(amount)
+        _save_budget(cfg)
+        print(f"Budget set to ${float(amount):.2f}/month.")
+        return
+    cap = cfg.get("monthly_usd")
+    if cap is None:
+        print("No budget set. Run: python cli.py budget --set 50")
+    else:
+        print(f"Current budget: ${cap:.2f}/month")
+
+
 def cmd_stats():
     conn = require_db()
     conn.row_factory = sqlite3.Row
@@ -537,6 +559,7 @@ COMMANDS = {
     "today": cmd_today,
     "week": cmd_week,
     "stats": cmd_stats,
+    "budget": cmd_budget,
     "dashboard": cmd_dashboard,
     "theme": cmd_theme,
 }
@@ -567,5 +590,9 @@ if __name__ == "__main__":
         )
     elif command == "scan" and projects_dir:
         cmd_scan(projects_dir=projects_dir)
+    elif command == "budget":
+        amt = parse_named_arg(rest, "--set")
+        clear = "--clear" in rest
+        cmd_budget(amount=amt, clear=clear)
     else:
         COMMANDS[command]()
