@@ -9,6 +9,7 @@ Commands:
 """
 
 import os
+import json
 import sys
 import sqlite3
 from pathlib import Path
@@ -347,6 +348,37 @@ def cmd_dashboard(projects_dir=None, host=None, port=None):
     serve(host=host, port=port)
 
 
+# ── Inbound webhook viewer ────────────────────────────────────────────────────
+
+def cmd_inbound(tail=20):
+    """Print the most recent events from ~/.claude/inbound.jsonl.
+    Reads via dashboard.read_inbound_events so the wire format and parser
+    stay in sync with the HTTP endpoint."""
+    from dashboard import read_inbound_events, INBOUND_LOG
+    try:
+        n = int(tail) if tail is not None else 20
+    except (TypeError, ValueError):
+        n = 20
+    n = max(1, min(n, 1000))
+    events = read_inbound_events(limit=n)
+    if not events:
+        print(f"No inbound events. (Looked at {INBOUND_LOG})")
+        return
+    # read_inbound_events returns newest-first; print oldest-first so the
+    # latest event lands at the bottom of the terminal where the cursor is.
+    for ev in reversed(events):
+        ts = ev.get("received_at", "?")
+        typ = ev.get("type", "?")
+        ip = ev.get("source_ip", "?")
+        payload = ev.get("payload", {})
+        try:
+            payload_str = json.dumps(payload, separators=(",", ":"))
+        except (TypeError, ValueError):
+            payload_str = str(payload)
+        print(f"[{ts}] {typ}  from={ip}  {payload_str}")
+    print(f"\n({len(events)} event{'s' if len(events) != 1 else ''} shown from {INBOUND_LOG})")
+
+
 # ── Theme command ──────────────────────────────────────────────────────────────
 
 def cmd_theme():
@@ -530,6 +562,7 @@ Usage:
   python3 cli.py dashboard [--projects-dir PATH] [--host HOST] [--port PORT]
                                                  Scan + start dashboard
   python3 cli.py theme <list|add|remove>          Manage UI themes
+  python3 cli.py inbound [--tail N]               Show recent inbound webhook events
 """
 
 COMMANDS = {
@@ -539,6 +572,7 @@ COMMANDS = {
     "stats": cmd_stats,
     "dashboard": cmd_dashboard,
     "theme": cmd_theme,
+    "inbound": cmd_inbound,
 }
 
 def parse_named_arg(args, flag):
@@ -567,5 +601,7 @@ if __name__ == "__main__":
         )
     elif command == "scan" and projects_dir:
         cmd_scan(projects_dir=projects_dir)
+    elif command == "inbound":
+        cmd_inbound(tail=parse_named_arg(rest, "--tail"))
     else:
         COMMANDS[command]()
