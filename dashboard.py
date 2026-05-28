@@ -403,6 +403,24 @@ def get_dashboard_data(db_path=None):
             ORDER BY last_timestamp DESC
         """).fetchall()
 
+    # ── Tools (turns + tokens) per tool_name across all history ───────────────
+    tool_rows = conn.execute("""
+        SELECT
+            COALESCE(NULLIF(tool_name, ''), '(no tool / direct turn)') as tool,
+            timestamp,
+            COUNT(*) as turns,
+            SUM(input_tokens + output_tokens) as tokens
+        FROM turns
+        WHERE timestamp IS NOT NULL
+        GROUP BY DATE(timestamp), tool
+        ORDER BY timestamp ASC
+    """).fetchall()
+    tools_daily = [
+        {"day": (r["timestamp"] or "")[:10], "tool": r["tool"],
+         "turns": r["turns"] or 0, "tokens": r["tokens"] or 0}
+        for r in tool_rows
+    ]
+
     sessions_all = []
     for r in session_rows:
         try:
@@ -465,6 +483,7 @@ def get_dashboard_data(db_path=None):
         "plan_recommendation": plan_recommendation,
         "dow_hour":        dow_hour,
         "streak":          streak,
+        "tools_daily":        tools_daily,
         "generated_at":       datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
@@ -1190,6 +1209,14 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <div class="chart-wrap"><canvas id="chart-project"></canvas></div>
     </div>
   </div>
+
+  <div class="charts-grid" style="grid-template-columns: 1fr;">
+    <div class="chart-card">
+      <h2>Top Tools by Turns</h2>
+      <div id="tools-chart-empty" style="display:none; color:var(--muted); padding:24px 0; text-align:center;">No tool_name data yet — older transcripts may not have tool info.</div>
+      <div class="chart-wrap"><canvas id="chart-tools"></canvas></div>
+    </div>
+  </div>
   <div class="table-card">
     <div class="section-header"><div class="section-title">Cost by Model</div><div class="section-actions"><button class="md-btn" onclick="copyModelMD()" title="Copy table as markdown">&#x1f4cb; MD</button></div></div>
     <table id="model-cost-table">
@@ -1810,6 +1837,12 @@ function applyFilter() {
   renderPareto(lastFilteredSessions || filteredSessions);
   renderPlanCard();
   renderDowHourHeatmap();
+  // Tools chart: filter by selected date range; tool field is captured for
+  // assistant turns that issued a tool_use event.
+  const filteredTools = (rawData.tools_daily || []).filter(r =>
+    (!start || r.day >= start) && (!end || r.day <= end)
+  );
+  renderToolsChart(filteredTools);
   lastFilteredSessions = sortSessions(filteredSessions);
   lastByProject = sortProjects(byProject);
   lastByProjectBranch = sortProjectBranch(byProjectBranch);
@@ -2269,6 +2302,65 @@ function _closeSessionModal() {  // eslint-disable-line no-unused-vars
 document.addEventListener("keydown", e => {
   if (e.key === "Escape") _closeSessionModal();
 });
+
+let toolsChart = null;
+function renderToolsChart(rows) {  // eslint-disable-line no-unused-vars
+  const ctx = document.getElementById('chart-tools');
+  if (!ctx) return;
+  const empty = document.getElementById('tools-chart-empty');
+  // Aggregate the per-(day,tool) rows we just got into top-N tools by turns.
+  const agg = {};
+  for (const r of rows) {
+    if (!agg[r.tool]) agg[r.tool] = { turns: 0, tokens: 0 };
+    agg[r.tool].turns += r.turns || 0;
+    agg[r.tool].tokens += r.tokens || 0;
+  }
+  // Sort by turn count desc, take top 12 so the chart stays readable.
+  const ranked = Object.entries(agg)
+    .map(([tool, v]) => ({ tool, turns: v.turns, tokens: v.tokens }))
+    .sort((a, b) => b.turns - a.turns)
+    .slice(0, 12);
+  if (!ranked.length) {
+    if (empty) empty.style.display = 'block';
+    ctx.style.display = 'none';
+    return;
+  }
+  if (empty) empty.style.display = 'none';
+  ctx.style.display = '';
+  if (toolsChart) toolsChart.destroy();
+  toolsChart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: ranked.map(r => r.tool),
+      datasets: [{
+        label: 'Turns',
+        data: ranked.map(r => r.turns),
+        backgroundColor: 'rgba(217, 119, 87, 0.7)',
+        borderRadius: 4,
+      }],
+    },
+    options: {
+      indexAxis: 'y',
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            afterLabel: (ctx) => {
+              const r = ranked[ctx.dataIndex];
+              return 'Tokens (in+out): ' + (r.tokens || 0).toLocaleString();
+            },
+          },
+        },
+      },
+      scales: {
+        x: { beginAtZero: true, ticks: { color: 'var(--muted)' } },
+        y: { ticks: { color: 'var(--text)', autoSkip: false } },
+      },
+    },
+  });
+}
 
 function renderProjectChart(byProject) {
   const top = byProject.slice(0, 10);
