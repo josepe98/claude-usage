@@ -181,6 +181,99 @@ def get_themes():
     return list(themes.values())
 
 
+def _cache_hit_ratio(input_tokens, cache_read_tokens):
+    """Ratio of cache_read over (input + cache_read). 0.0 when both are zero.
+
+    A ratio of 0% means no cache hits at all; 100% means every token of
+    "fresh" prompt context was actually served from cache (rare, but possible
+    on long warm sessions).
+    """
+    denom = (input_tokens or 0) + (cache_read_tokens or 0)
+    if denom <= 0:
+        return 0.0
+    return (cache_read_tokens or 0) / denom
+
+
+def _cache_hit_category(ratio):
+    """Bucket a ratio into 'low' / 'medium' / 'high'."""
+    if ratio < 0.30:
+        return "low"
+    if ratio <= 0.70:
+        return "medium"
+    return "high"
+
+
+def _cache_hit_analysis(conn, input_threshold=50_000):
+    """Per-session cache hit ratios and a global summary.
+
+    Returns a dict shaped like::
+
+        {
+          "per_session": {session_id_full: {"ratio": float, "category": str,
+                                            "input": int, "cache_read": int,
+                                            "underusing": bool}, ...},
+          "summary": {
+              "avg_ratio": float,                # 0..1, mean across sessions
+              "avg_ratio_pct": float,            # convenience, 0..100, 1dp
+              "sessions_total": int,
+              "sessions_with_cache": int,        # ratio > 0
+              "sessions_underusing": int,        # ratio<0.3 AND input>threshold
+              "input_threshold": int,
+              "by_category": {"low": int, "medium": int, "high": int},
+          },
+        }
+
+    "Underusing" flags sessions paying full price for repeat content: they
+    have high raw input but rarely (<30%) hit the prompt cache.
+    """
+    rows = conn.execute("""
+        SELECT
+            session_id,
+            COALESCE(total_input_tokens, 0)  AS input,
+            COALESCE(total_cache_read, 0)    AS cache_read
+        FROM sessions
+    """).fetchall()
+
+    per_session = {}
+    ratios = []
+    by_category = {"low": 0, "medium": 0, "high": 0}
+    with_cache = 0
+    underusing = 0
+
+    for r in rows:
+        sid = r["session_id"]
+        inp = r["input"] or 0
+        cr  = r["cache_read"] or 0
+        ratio = _cache_hit_ratio(inp, cr)
+        cat = _cache_hit_category(ratio)
+        is_under = (ratio < 0.30) and (inp > input_threshold)
+        per_session[sid] = {
+            "ratio": round(ratio, 4),
+            "category": cat,
+            "input": inp,
+            "cache_read": cr,
+            "underusing": is_under,
+        }
+        ratios.append(ratio)
+        by_category[cat] += 1
+        if ratio > 0:
+            with_cache += 1
+        if is_under:
+            underusing += 1
+
+    avg = (sum(ratios) / len(ratios)) if ratios else 0.0
+    summary = {
+        "avg_ratio":           round(avg, 4),
+        "avg_ratio_pct":       round(avg * 100, 1),
+        "sessions_total":      len(ratios),
+        "sessions_with_cache": with_cache,
+        "sessions_underusing": underusing,
+        "input_threshold":     input_threshold,
+        "by_category":         by_category,
+    }
+    return {"per_session": per_session, "summary": summary}
+
+
 def _cost_concentration(sessions_with_cost, top_n=5):
     """Compute Pareto-style concentration: top-N sessions' cost as % of total."""
     if not sessions_with_cost:
@@ -403,6 +496,9 @@ def get_dashboard_data(db_path=None):
             ORDER BY last_timestamp DESC
         """).fetchall()
 
+    cache_hit = _cache_hit_analysis(conn)
+    cache_hit_per_session = cache_hit["per_session"]
+
     sessions_all = []
     for r in session_rows:
         try:
@@ -411,6 +507,7 @@ def get_dashboard_data(db_path=None):
             duration_min = round((t2 - t1).total_seconds() / 60, 1)
         except Exception:
             duration_min = 0
+        ch = cache_hit_per_session.get(r["session_id"], {})
         sessions_all.append({
             "session_id":      r["session_id"][:8],
             "session_id_full": r["session_id"],
@@ -427,6 +524,9 @@ def get_dashboard_data(db_path=None):
             "output":        r["total_output_tokens"] or 0,
             "cache_read":    r["total_cache_read"] or 0,
             "cache_creation": r["total_cache_creation"] or 0,
+            "cache_hit_ratio":     ch.get("ratio", 0.0),
+            "cache_hit_category":  ch.get("category", "low"),
+            "cache_underusing":    ch.get("underusing", False),
         })
 
     # Plan comparison — compute month-to-date USD inline.
@@ -458,14 +558,15 @@ def get_dashboard_data(db_path=None):
     conn.close()
 
     return {
-        "all_models":      all_models,
-        "daily_by_model":  daily_by_model,
-        "hourly_by_model": hourly_by_model,
-        "sessions_all":    sessions_all,
+        "all_models":          all_models,
+        "daily_by_model":      daily_by_model,
+        "hourly_by_model":     hourly_by_model,
+        "sessions_all":        sessions_all,
+        "cache_hit_summary":   cache_hit["summary"],
         "plan_recommendation": plan_recommendation,
-        "dow_hour":        dow_hour,
-        "streak":          streak,
-        "generated_at":       datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "dow_hour":            dow_hour,
+        "streak":              streak,
+        "generated_at":        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
 
@@ -1037,6 +1138,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   tr:last-child td { border-bottom: none; }
   tr:hover td { background: rgba(0,113,227,0.03); }
   .model-tag { display: inline-block; padding: 2px 8px; border-radius: 980px; font-size: 11px; background: rgba(0,113,227,0.08); color: var(--accent); letter-spacing: -0.08px; }
+    .cache-warn-badge { display:inline-block; margin-left:6px; padding:1px 6px; border-radius:10px; background:rgba(217,119,87,0.18); color:var(--text); font-size:10px; font-weight:600; letter-spacing:0.02em; vertical-align:middle; cursor:help; }
   .session-name { color: var(--text); font-weight: 600; }
   .cost { color: var(--green); font-family: "SF Mono", ui-monospace, monospace; font-size: 12px; }
   .cost-na { color: var(--muted); font-family: "SF Mono", ui-monospace, monospace; font-size: 11px; }
@@ -1149,6 +1251,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <div class="stats-row" id="stats-row"></div>
     <div id="pareto-card" style="display:none; margin: -8px 0 16px 0; padding: 10px 14px; background: rgba(217,119,87,0.08); border-radius: 8px; font-size: 12px; color: var(--text);"></div>
     <div id="plan-card" style="display:none; margin:0 0 16px 0; padding:10px 14px; background:rgba(74,222,128,0.08); border-radius:8px; font-size:12px; color:var(--text);"></div>
+    <div id="cache-hit-card" style="display:none; margin: -4px 0 16px 0; padding: 10px 14px; background: rgba(94,106,210,0.08); border-radius: 8px; font-size: 12px; color: var(--text);"></div>
   <div class="charts-grid">
     <div class="chart-card wide">
       <h2 id="daily-chart-title">Daily Token Usage</h2>
@@ -1810,6 +1913,7 @@ function applyFilter() {
   renderPareto(lastFilteredSessions || filteredSessions);
   renderPlanCard();
   renderDowHourHeatmap();
+  renderCacheHit(rawData ? rawData.cache_hit_summary : null);
   lastFilteredSessions = sortSessions(filteredSessions);
   lastByProject = sortProjects(byProject);
   lastByProjectBranch = sortProjectBranch(byProjectBranch);
@@ -2110,6 +2214,26 @@ function renderModelChart(byModel) {
   });
 }
 
+
+function renderCacheHit(summary) {  // eslint-disable-line no-unused-vars
+  const el = document.getElementById("cache-hit-card");
+  if (!el) return;
+  if (!summary || !summary.sessions_total) {
+    el.style.display = "none";
+    return;
+  }
+  const avgPct = (summary.avg_ratio_pct != null
+    ? summary.avg_ratio_pct
+    : (summary.avg_ratio * 100)).toFixed(1);
+  const under = summary.sessions_underusing || 0;
+  const thr = summary.input_threshold || 50000;
+  el.style.display = "";
+  const tail = under > 0
+    ? `<strong>${under}</strong> session${under === 1 ? "" : "s"} are underusing caching (input &gt; ${fmt(thr)} tok, cache hit &lt; 30%) &mdash; see them tagged in the table.`
+    : `No sessions are underusing the prompt cache right now.`;
+  el.innerHTML = `<strong>Avg cache hit ratio:</strong> ${avgPct}%. ${tail}`;
+}
+
 function renderPareto(filteredSessions) {  // eslint-disable-line no-unused-vars
   const el = document.getElementById("pareto-card");
   if (!el) return;
@@ -2302,9 +2426,13 @@ function renderSessionsTable(sessions) {
       ? `<td class="cost">${fmtCost(cost)}</td>`
       : `<td class="cost-na">n/a</td>`;
     const tagLink = ` <a href="#" onclick="event.stopPropagation(); _promptTags('${esc(s.session_id)}'); return false;" style="font-size:10px;color:var(--muted);text-decoration:none;">tag</a>${_renderTags(s)}`;
+    const ratioPct = Math.round((s.cache_hit_ratio || 0) * 100);
+    const badge = s.cache_underusing
+      ? ` <span class="cache-warn-badge" title="High input (${fmt(s.input)} tok) but only ${ratioPct}% cache hit — likely paying full price for repeat content.">cache underused</span>`
+      : '';
     const sessionCell = s.session_name
-      ? `<td><span class="session-name">${esc(s.session_name)}</span> <span class="muted" style="font-family:monospace">(<a href="#" onclick="_openSession('${s.session_id}'); return false;" style="color:var(--accent); text-decoration:none;">${esc(s.session_id)}</a>&hellip;)</span>${tagLink}</td>`
-      : `<td class="muted" style="font-family:monospace"><a href="#" onclick="_openSession('${s.session_id}'); return false;" style="color:var(--accent); text-decoration:none;">${esc(s.session_id)}</a>&hellip;${tagLink}</td>`;
+      ? `<td><span class="session-name">${esc(s.session_name)}</span> <span class="muted" style="font-family:monospace">(<a href="#" onclick="_openSession('${s.session_id}'); return false;" style="color:var(--accent); text-decoration:none;">${esc(s.session_id)}</a>&hellip;)</span>${tagLink}${badge}</td>`
+      : `<td class="muted" style="font-family:monospace"><a href="#" onclick="_openSession('${s.session_id}'); return false;" style="color:var(--accent); text-decoration:none;">${esc(s.session_id)}</a>&hellip;${tagLink}${badge}</td>`;
     return `<tr class="session-row ${selectedSessionId === s.session_id_full ? 'selected' : ''}" data-session-id="${esc(s.session_id_full)}">
       ${sessionCell}
       <td>${esc(s.project)}</td>
