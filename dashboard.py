@@ -1025,8 +1025,6 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .tz-btn:last-child { border-right: none; }
   .tz-btn:hover { background: rgba(255,255,255,0.04); color: var(--text); }
   .tz-btn.active { background: rgba(217,119,87,0.15); color: var(--accent); }
-  .peak-legend { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--muted); }
-  .peak-swatch { width: 10px; height: 10px; background: rgba(248,113,113,0.8); border-radius: 2px; display: inline-block; }
 
   table { width: 100%; border-collapse: collapse; }
   th { text-align: left; padding: 8px 12px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); border-bottom: 1px solid var(--border); white-space: nowrap; }
@@ -1171,7 +1169,6 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <div class="chart-header">
         <h2 id="hourly-chart-title">Average Hourly Distribution</h2>
         <div class="chart-header-right">
-          <span class="peak-legend" title="Mon–Fri 05:00–11:00 PT — Anthropic peak-hour throttling window"><span class="peak-swatch"></span>Peak hours (PT)</span>
           <span class="chart-day-count" id="hourly-day-count"></span>
           <div class="tz-group">
             <button class="tz-btn" data-tz="local" onclick="setHourlyTZ('local')">Local</button>
@@ -1384,31 +1381,16 @@ let lastByModel = [];
 let sessionSortDir = 'desc';
 let hourlyTZ = (_loadPrefs().hourlyTZ) || 'local';  // 'local' or 'utc'
 
-// ── Peak-hour config ───────────────────────────────────────────────────────
-// Anthropic throttles Mon–Fri 05:00–11:00 PT. We approximate as fixed UTC hours
-// 12–17 (matches PDT; during PST the window shifts by 1h — accepted simplification).
-const PEAK_HOURS_UTC = new Set([12, 13, 14, 15, 16, 17]);
-
 // Local-timezone offset in hours (signed). Fractional offsets (e.g. India UTC+5:30)
 // are rounded to the nearest hour for bucket alignment.
 function localOffsetHours() {
   return Math.round(-new Date().getTimezoneOffset() / 60);
 }
 
-// Return the UTC hour (0–23) corresponding to a displayed-hour bucket.
-function displayHourToUTC(displayHour, tzMode) {
-  if (tzMode === 'utc') return displayHour;
-  return ((displayHour - localOffsetHours()) % 24 + 24) % 24;
-}
-
 // Return the displayed-hour bucket for a UTC hour.
 function utcHourToDisplay(utcHour, tzMode) {
   if (tzMode === 'utc') return utcHour;
   return ((utcHour + localOffsetHours()) % 24 + 24) % 24;
-}
-
-function isPeakHour(displayHour, tzMode) {
-  return PEAK_HOURS_UTC.has(displayHourToUTC(displayHour, tzMode));
 }
 
 function formatHourLabel(h) {
@@ -1987,7 +1969,6 @@ function aggregateHourly(rows, tzMode) {
       avgTurns:   dayCount ? byHour[h].turns  / dayCount : 0,
       avgOutput:  dayCount ? byHour[h].output / dayCount : 0,
       totalTurns: byHour[h].turns,
-      peak:       isPeakHour(h, tzMode),
     });
   }
   return { hours, dayCount };
@@ -2002,10 +1983,10 @@ function renderHourlyChart(agg) {
   const ctx = document.getElementById('chart-hourly').getContext('2d');
   if (charts.hourly) charts.hourly.destroy();
 
-  const labels = agg.hours.map(h => (h.peak ? '⚡ ' : '') + formatHourLabel(h.hour));
+  const labels = agg.hours.map(h => formatHourLabel(h.hour));
   const turns  = agg.hours.map(h => h.avgTurns);
   const output = agg.hours.map(h => h.avgOutput);
-  const barColors = agg.hours.map(h => h.peak ? 'rgba(248,113,113,0.8)' : tokenColors().input);
+  const barColors = tokenColors().input;
 
   charts.hourly = new Chart(ctx, {
     data: {
@@ -2044,8 +2025,7 @@ function renderHourlyChart(agg) {
               if (!items.length) return '';
               const idx = items[0].dataIndex;
               const h = agg.hours[idx];
-              const base = formatHourLabel(h.hour) + ' ' + tzDisplayName(hourlyTZ);
-              return h.peak ? base + ' · Peak — Anthropic US hours' : base;
+              return formatHourLabel(h.hour) + ' ' + tzDisplayName(hourlyTZ);
             },
             label: (item) => {
               if (item.dataset.label && item.dataset.label.indexOf('turns') !== -1) {
