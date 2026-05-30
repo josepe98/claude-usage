@@ -517,6 +517,150 @@ Example:
 """)
 
 
+# ── Shell completions ─────────────────────────────────────────────────────────
+
+# Known long-flag set, kept here so completions stay in sync with the parser.
+# Adding a new flag? Add it here too.
+COMPLETION_FLAGS = [
+    "--projects-dir",
+    "--host",
+    "--port",
+]
+
+
+def _bash_completion_script(commands, flags):
+    cmds = " ".join(commands)
+    fls = " ".join(flags)
+    return f"""# bash completion for claude-usage CLI
+# Install:
+#   python3 cli.py completions bash > ~/.claude-usage-completion.bash
+#   echo 'source ~/.claude-usage-completion.bash' >> ~/.bashrc
+_claude_usage_complete() {{
+    local cur prev words cword
+    COMPREPLY=()
+    cur="${{COMP_WORDS[COMP_CWORD]}}"
+    prev="${{COMP_WORDS[COMP_CWORD-1]}}"
+    local commands="{cmds}"
+    local flags="{fls}"
+
+    # Completing the subcommand (first positional after the script).
+    if [ "$COMP_CWORD" -eq 1 ]; then
+        COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
+        return 0
+    fi
+
+    # Flags that take a path value -- defer to filename completion.
+    case "$prev" in
+        --projects-dir)
+            COMPREPLY=( $(compgen -f -- "$cur") )
+            return 0
+            ;;
+    esac
+
+    # Otherwise offer flags when the user starts typing a dash.
+    if [[ "$cur" == -* ]]; then
+        COMPREPLY=( $(compgen -W "$flags" -- "$cur") )
+        return 0
+    fi
+
+    return 0
+}}
+complete -F _claude_usage_complete claude-usage
+complete -F _claude_usage_complete cli.py
+"""
+
+
+def _zsh_completion_script(commands, flags):
+    cmds = " ".join(commands)
+    fls = " ".join(flags)
+    return f"""#compdef claude-usage cli.py
+# zsh completion for claude-usage CLI
+# Install:
+#   python3 cli.py completions zsh > ~/.zsh/completions/_claude-usage
+#   # ensure ~/.zsh/completions is on $fpath, then: autoload -U compinit && compinit
+_claude_usage() {{
+    local -a commands flags
+    commands=({cmds})
+    flags=({fls})
+
+    if (( CURRENT == 2 )); then
+        _describe 'command' commands
+        return
+    fi
+
+    case "${{words[CURRENT-1]}}" in
+        --projects-dir)
+            _files
+            return
+            ;;
+    esac
+
+    if [[ "${{words[CURRENT]}}" == -* ]]; then
+        compadd -- $flags
+    fi
+}}
+compdef _claude_usage claude-usage cli.py
+"""
+
+
+def _fish_completion_script(commands, flags):
+    lines = ["# fish completion for claude-usage CLI",
+             "# Install:",
+             "#   python3 cli.py completions fish > ~/.config/fish/completions/claude-usage.fish",
+             "complete -c claude-usage -f"]
+    for c in commands:
+        lines.append(f"complete -c claude-usage -n '__fish_use_subcommand' -a '{c}'")
+    # Flags that take a file argument: enable file completion after them.
+    file_flags = {"--projects-dir"}
+    for f in flags:
+        flag = f.lstrip("-")
+        if f in file_flags:
+            lines.append(f"complete -c claude-usage -l {flag} -r -F")
+        else:
+            lines.append(f"complete -c claude-usage -l {flag}")
+    return "\n".join(lines) + "\n"
+
+
+_COMPLETIONS_SENTINEL = object()
+
+
+def cmd_completions(shell=_COMPLETIONS_SENTINEL):
+    """Print a tab-completion script for the requested shell to stdout.
+
+    Pass an explicit ``shell`` (string or ``None``) when calling
+    programmatically; the default sentinel falls back to ``sys.argv[2]`` for
+    the bare ``COMMANDS[command]()`` dispatch case.
+    """
+    if shell is _COMPLETIONS_SENTINEL:
+        shell = sys.argv[2] if len(sys.argv) > 2 else None
+
+    if not shell:
+        import os
+        detected = os.path.basename(os.environ.get("SHELL", "")).lower()
+        if detected in ("bash", "zsh", "fish"):
+            shell = detected
+        else:
+            print("Usage: python3 cli.py completions <bash|zsh|fish>", file=sys.stderr)
+            sys.exit(2)
+
+    shell = shell.lower()
+    commands = sorted(COMMANDS.keys())
+    flags = list(COMPLETION_FLAGS)
+
+    if shell == "bash":
+        sys.stdout.write(_bash_completion_script(commands, flags))
+    elif shell == "zsh":
+        sys.stdout.write(_zsh_completion_script(commands, flags))
+    elif shell == "fish":
+        sys.stdout.write(_fish_completion_script(commands, flags))
+    else:
+        print(
+            f"Unknown shell '{shell}'. Supported shells: bash, zsh, fish.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 USAGE = """
@@ -530,6 +674,7 @@ Usage:
   python3 cli.py dashboard [--projects-dir PATH] [--host HOST] [--port PORT]
                                                  Scan + start dashboard
   python3 cli.py theme <list|add|remove>          Manage UI themes
+  python3 cli.py completions <bash|zsh|fish>      Print shell tab-completion script
 """
 
 COMMANDS = {
@@ -539,6 +684,7 @@ COMMANDS = {
     "stats": cmd_stats,
     "dashboard": cmd_dashboard,
     "theme": cmd_theme,
+    "completions": cmd_completions,
 }
 
 def parse_named_arg(args, flag):
@@ -567,5 +713,7 @@ if __name__ == "__main__":
         )
     elif command == "scan" and projects_dir:
         cmd_scan(projects_dir=projects_dir)
+    elif command == "completions":
+        cmd_completions(shell=rest[0] if rest else None)
     else:
         COMMANDS[command]()
