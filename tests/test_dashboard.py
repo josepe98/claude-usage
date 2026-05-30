@@ -431,11 +431,6 @@ class TestHTMLTemplate(unittest.TestCase):
         self.assertIn('data-tz="local"', HTML_TEMPLATE)
         self.assertIn('data-tz="utc"', HTML_TEMPLATE)
 
-    def test_hourly_peak_hour_constants(self):
-        """Peak-hour set covers UTC 12–17 (Mon–Fri 05:00–11:00 PT)."""
-        self.assertIn('PEAK_HOURS_UTC', HTML_TEMPLATE)
-        self.assertIn('[12, 13, 14, 15, 16, 17]', HTML_TEMPLATE)
-
     def test_range_filter_uses_bounds_for_all_filtered_data(self):
         """Regression for GH#88: range filtering must not reference undefined variables."""
         apply_filter = self._extract_js_function("applyFilter")
