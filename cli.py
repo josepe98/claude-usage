@@ -347,6 +347,15 @@ def cmd_dashboard(projects_dir=None, host=None, port=None):
     serve(host=host, port=port)
 
 
+
+def cmd_tray(url=None):
+    """Launch the menu-bar / tray app showing today's spend."""
+    import tray as tray_mod
+    base = url or f"http://{os.environ.get('HOST', 'localhost')}:{os.environ.get('PORT', '8080')}"
+    sys.exit(tray_mod.run(base))
+
+
+
 # ── Theme command ──────────────────────────────────────────────────────────────
 
 def cmd_theme():
@@ -530,6 +539,7 @@ Usage:
   python3 cli.py dashboard [--projects-dir PATH] [--host HOST] [--port PORT]
                                                  Scan + start dashboard
   python3 cli.py theme <list|add|remove>          Manage UI themes
+  python3 cli.py tray [--url URL]                 Launch tray / menu-bar app
 """
 
 COMMANDS = {
@@ -539,6 +549,7 @@ COMMANDS = {
     "stats": cmd_stats,
     "dashboard": cmd_dashboard,
     "theme": cmd_theme,
+    "tray": cmd_tray,
 }
 
 def parse_named_arg(args, flag):
@@ -567,5 +578,7 @@ if __name__ == "__main__":
         )
     elif command == "scan" and projects_dir:
         cmd_scan(projects_dir=projects_dir)
+    elif command == "tray":
+        cmd_tray(url=parse_named_arg(rest, "--url"))
     else:
         COMMANDS[command]()
