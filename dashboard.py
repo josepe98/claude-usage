@@ -1166,6 +1166,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <button class="range-btn" data-range="30d" onclick="setRange('30d')">30d</button>
       <button class="range-btn" data-range="90d" onclick="setRange('90d')">90d</button>
       <button class="range-btn" data-range="all" onclick="setRange('all')">All</button>
+      <button class="range-btn" data-range="custom" onclick="setRange('custom')">Custom</button>
+    </div>
+    <div id="custom-range">
+      <input type="date" id="custom-from" onchange="onCustomDateChange()">
+      <span class="range-sep">to</span>
+      <input type="date" id="custom-to" onchange="onCustomDateChange()">
     </div>
   </div>
 </div>
@@ -1489,9 +1495,12 @@ function modelColors() {
 }
 
 // ── Time range ─────────────────────────────────────────────────────────────
-const RANGE_LABELS = { 'today': 'Today', 'week': 'This Week', 'month': 'This Month', 'prev-month': 'Previous Month', '7d': 'Last 7 Days', '30d': 'Last 30 Days', '90d': 'Last 90 Days', 'all': 'All Time' };
-const RANGE_TICKS  = { 'today': 1, 'week': 7, 'month': 15, 'prev-month': 15, '7d': 7, '30d': 15, '90d': 13, 'all': 12 };
+const RANGE_LABELS = { 'today': 'Today', 'week': 'This Week', 'month': 'This Month', 'prev-month': 'Previous Month', '7d': 'Last 7 Days', '30d': 'Last 30 Days', '90d': 'Last 90 Days', 'all': 'All Time', 'custom': 'Custom Range' };
+const RANGE_TICKS  = { 'today': 1, 'week': 7, 'month': 15, 'prev-month': 15, '7d': 7, '30d': 15, '90d': 13, 'all': 12, 'custom': 12 };
 const VALID_RANGES = Object.keys(RANGE_LABELS);
+
+let customFrom = '';
+let customTo   = '';
 
 function rangeIncludesToday(range) {
   if (range === 'all') return true;
@@ -1504,6 +1513,7 @@ function rangeIncludesToday(range) {
 
 function getRangeBounds(range) {
   if (range === 'all') return { start: null, end: null };
+  if (range === 'custom') return { start: customFrom || null, end: customTo || null };
   const today = new Date();
   const iso = d => d.toISOString().slice(0, 10);
   if (range === 'today') {
@@ -1544,6 +1554,15 @@ function setRange(range) {
   document.querySelectorAll('.range-btn').forEach(btn =>
     btn.classList.toggle('active', btn.dataset.range === range)
   );
+  document.getElementById('custom-range').classList.toggle('visible', range === 'custom');
+  updateURL();
+  applyFilter();
+  scheduleAutoRefresh();
+}
+
+function onCustomDateChange() {
+  customFrom = document.getElementById('custom-from').value;
+  customTo   = document.getElementById('custom-to').value;
   updateURL();
   applyFilter();
   scheduleAutoRefresh();
@@ -1639,6 +1658,10 @@ function updateURL() {
   const allModelIds = Array.from(document.querySelectorAll('#model-checkboxes input')).map(cb => cb.value);
   const params = new URLSearchParams();
   if (selectedRange !== '30d') params.set('range', selectedRange);
+  if (selectedRange === 'custom') {
+    if (customFrom) params.set('from', customFrom);
+    if (customTo)   params.set('to',   customTo);
+  }
   if (!isDefaultModelSelection(allModelIds.map(id => ({id})))) params.set('models', Array.from(selectedModels).join(','));
   const search = params.toString() ? '?' + params.toString() : '';
   history.replaceState(null, '', window.location.pathname + search);
@@ -1819,8 +1842,13 @@ function applyFilter() {
   const hourlyAgg = aggregateHourly(hourlySrc, hourlyTZ);
 
   // Update daily chart title
-  document.getElementById('daily-chart-title').textContent = 'Daily Token Usage \u2014 ' + RANGE_LABELS[selectedRange];
-  document.getElementById('hourly-chart-title').textContent = 'Average Hourly Distribution \u2014 ' + RANGE_LABELS[selectedRange];
+  let rangeTitle = RANGE_LABELS[selectedRange];
+  if (selectedRange === 'custom') {
+    const parts = [customFrom, customTo].filter(Boolean);
+    if (parts.length) rangeTitle = parts.join(' \u2192 ');
+  }
+  document.getElementById('daily-chart-title').textContent = 'Daily Token Usage \u2014 ' + rangeTitle;
+  document.getElementById('hourly-chart-title').textContent = 'Average Hourly Distribution \u2014 ' + rangeTitle;
 
   renderStats(totals, prevTotals);
   renderDailyChart(daily);
@@ -2666,6 +2694,17 @@ async function loadData() {
       document.querySelectorAll('.range-btn').forEach(btn =>
         btn.classList.toggle('active', btn.dataset.range === selectedRange)
       );
+      // Restore custom date range from URL if applicable
+      if (selectedRange === 'custom') {
+        const p = new URLSearchParams(window.location.search);
+        customFrom = p.get('from') || '';
+        customTo   = p.get('to')   || '';
+        const fromEl = document.getElementById('custom-from');
+        const toEl   = document.getElementById('custom-to');
+        if (fromEl) fromEl.value = customFrom;
+        if (toEl)   toEl.value   = customTo;
+        document.getElementById('custom-range').classList.add('visible');
+      }
       // Mark default TZ button active
       document.querySelectorAll('.tz-btn').forEach(btn =>
         btn.classList.toggle('active', btn.dataset.tz === hourlyTZ)
