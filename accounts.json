@@ -1,0 +1,8 @@
+{
+  "_comment": "Copy this file to ~/.claude/accounts.json. Keys are substring fragments matched against each session's cwd (first match wins, insertion order). Values are the account label shown in the dashboard dropdown. Sessions with no match get account = 'default'.",
+
+  "PhpstormProjects/work-": "work",
+  "PhpstormProjects/personal-": "personal",
+  "/Users/me/clients/acme/": "acme",
+  "/Users/me/oss/": "oss"
+}
