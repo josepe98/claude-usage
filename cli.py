@@ -16,7 +16,7 @@ from datetime import datetime, date, timedelta
 
 DB_PATH = Path.home() / ".claude" / "usage.db"
 
-from pricing import PRICING, get_pricing, calc_cost
+from pricing import PRICING, PRICING_HISTORY, get_pricing, calc_cost
 
 
 def fmt(n):
@@ -347,6 +347,77 @@ def cmd_dashboard(projects_dir=None, host=None, port=None):
     serve(host=host, port=port)
 
 
+# ── Pricing command ───────────────────────────────────────────────────────────
+
+def _pricing_columns():
+    """Column spec for the pricing tables: (header, dict-key)."""
+    return [
+        ("model",              None),  # special: dict key, not value lookup
+        ("input",              "input"),
+        ("output",             "output"),
+        ("cache_read",         "cache_read"),
+        ("cache_creation_5m",  "cache_write_5m"),
+        ("cache_creation_1h",  "cache_write_1h"),
+    ]
+
+
+def _format_pricing_row(model, rates):
+    """Render one model's row. Missing keys (partial PRICING_HISTORY entries) render as '-'."""
+    cols = _pricing_columns()
+    parts = [f"{model:<22}"]
+    for header, key in cols[1:]:
+        if rates is None or key not in rates:
+            parts.append(f"{'-':>20}")
+        else:
+            parts.append(f"{rates[key]:>20.6f}")
+    return "  ".join(parts)
+
+
+def _print_pricing_header():
+    cols = _pricing_columns()
+    head = [f"{cols[0][0]:<22}"] + [f"{h:>20}" for h, _ in cols[1:]]
+    print("  ".join(head))
+    print("  ".join(["-" * 22] + ["-" * 20 for _ in cols[1:]]))
+
+
+def cmd_pricing():
+    """Print the current PRICING table and the full PRICING_HISTORY.
+
+    Both views read straight from pricing.py — no database, no network. USD
+    per million tokens. Columns are aligned so the output is monospace-friendly
+    and greppable. Missing fields on partial PRICING_HISTORY entries render
+    as '-'.
+    """
+    print()
+    print("Current pricing (USD per million tokens)")
+    print("=" * 72)
+    _print_pricing_header()
+    for model, rates in PRICING.items():
+        print(_format_pricing_row(model, rates))
+    print()
+
+    print("Pricing history (oldest -> newest)")
+    print("=" * 72)
+    if not PRICING_HISTORY:
+        print("  (no history entries — current PRICING is the implicit head)")
+        print()
+        return
+
+    # PRICING_HISTORY is stored newest-first; print oldest-first for readability.
+    for entry in reversed(PRICING_HISTORY):
+        eff = entry.get("effective", "?")
+        snapshot = entry.get("pricing", {}) or {}
+        print()
+        print(f"effective: {eff}")
+        _print_pricing_header()
+        if not snapshot:
+            print("  (empty snapshot)")
+            continue
+        for model, rates in snapshot.items():
+            print(_format_pricing_row(model, rates))
+    print()
+
+
 # ── Theme command ──────────────────────────────────────────────────────────────
 
 def cmd_theme():
@@ -530,6 +601,7 @@ Usage:
   python3 cli.py dashboard [--projects-dir PATH] [--host HOST] [--port PORT]
                                                  Scan + start dashboard
   python3 cli.py theme <list|add|remove>          Manage UI themes
+  python3 cli.py pricing                          Print current pricing table + history
 """
 
 COMMANDS = {
@@ -539,6 +611,7 @@ COMMANDS = {
     "stats": cmd_stats,
     "dashboard": cmd_dashboard,
     "theme": cmd_theme,
+    "pricing": cmd_pricing,
 }
 
 def parse_named_arg(args, flag):

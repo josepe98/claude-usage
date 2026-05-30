@@ -2929,6 +2929,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
 
+        elif path == "/api/pricing":
+            # Mirror of pricing.py — current rates + historical snapshots — as JSON
+            # so scripts / dashboards can render pricing tables without grepping
+            # the source file. Lazy-import PRICING_HISTORY in case future refactors
+            # move it; PRICING is already imported at module load.
+            from pricing import PRICING_HISTORY as _PH
+            payload = {"current": PRICING, "history": _PH}
+            body = json.dumps(payload).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         elif self.path == "/themes":
             catalog_json = json.dumps(AWESOME_CATALOG)
             html = GALLERY_TEMPLATE.replace("__CATALOG_JSON__", catalog_json)
