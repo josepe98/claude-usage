@@ -517,6 +517,70 @@ Example:
 """)
 
 
+
+# ── Alerts ────────────────────────────────────────────────────────────────────
+
+def cmd_alerts(*args):
+    """Manage custom-alert rules from ~/.claude/alerts.json.
+
+    Subcommands:
+      list        - show every rule and its condition
+      test        - dry-run every rule (no actions executed)
+      trigger N   - force-fire rule named N (bypasses condition + cooldown)
+    """
+    import alerts as _alerts
+
+    sub = args[0] if args else "list"
+
+    if sub == "list":
+        try:
+            rules = _alerts.load_rules()
+        except _alerts.AlertError as exc:
+            print(f"Failed to load alerts: {exc}")
+            sys.exit(1)
+        if not rules:
+            print(f"No rules in {_alerts.CONFIG_PATH}.")
+            return
+        print(f"Loaded {len(rules)} rule(s) from {_alerts.CONFIG_PATH}:")
+        for r in rules:
+            print(f"  - {r.name}")
+            print(f"      when:   {r.condition}")
+            print(f"      action: {r.action.get('type')} (cooldown={r.cooldown_minutes}m)")
+
+    elif sub == "test":
+        try:
+            results = _alerts.evaluate_all(dry_run=True)
+        except _alerts.AlertError as exc:
+            print(f"Failed: {exc}")
+            sys.exit(1)
+        if not results:
+            print("No rules to evaluate.")
+            return
+        for r in results:
+            status = "MATCH" if r.get("matched") else "no-match"
+            if r.get("error"):
+                status = f"ERROR: {r['error']}"
+            elif r.get("skipped"):
+                status = f"matched (skipped: {r['skipped']})"
+            print(f"  {r['name']:<40} {status}")
+
+    elif sub == "trigger":
+        if len(args) < 2:
+            print("Usage: cli.py alerts trigger <rule-name>")
+            sys.exit(1)
+        import alerts as _alerts
+        try:
+            result = _alerts.fire_rule(args[1])
+        except _alerts.AlertError as exc:
+            print(f"Failed: {exc}")
+            sys.exit(1)
+        print(f"Fired {result['name']}: {result.get('action_result')}")
+
+    else:
+        print("Unknown alerts subcommand. Use: list | test | trigger <name>")
+        sys.exit(1)
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 USAGE = """
@@ -530,6 +594,7 @@ Usage:
   python3 cli.py dashboard [--projects-dir PATH] [--host HOST] [--port PORT]
                                                  Scan + start dashboard
   python3 cli.py theme <list|add|remove>          Manage UI themes
+  python3 cli.py alerts <list|test|trigger NAME>  Manage custom alert rules
 """
 
 COMMANDS = {
@@ -539,6 +604,7 @@ COMMANDS = {
     "stats": cmd_stats,
     "dashboard": cmd_dashboard,
     "theme": cmd_theme,
+    "alerts": cmd_alerts,
 }
 
 def parse_named_arg(args, flag):
@@ -559,6 +625,8 @@ if __name__ == "__main__":
 
     if command == "theme":
         cmd_theme()
+    elif command == "alerts":
+        cmd_alerts(*rest)
     elif command == "dashboard":
         cmd_dashboard(
             projects_dir=projects_dir,
