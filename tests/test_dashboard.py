@@ -68,7 +68,8 @@ class TestGetDashboardData(unittest.TestCase):
 
     def test_models_populated(self):
         data = get_dashboard_data(db_path=self.db_path)
-        self.assertIn("claude-sonnet-4-6", data["all_models"])
+        model_ids = [m["id"] for m in data["all_models"]]
+        self.assertIn("claude-sonnet-4-6", model_ids)
 
     def test_sessions_populated(self):
         data = get_dashboard_data(db_path=self.db_path)
@@ -515,8 +516,9 @@ class TestEmptyStringModel(unittest.TestCase):
 
     def test_empty_model_mapped_to_unknown_in_all_models(self):
         data = get_dashboard_data(db_path=self.db_path)
-        self.assertIn("unknown", data["all_models"])
-        self.assertNotIn("", data["all_models"])
+        model_ids = [m["id"] for m in data["all_models"]]
+        self.assertIn("unknown", model_ids)
+        self.assertNotIn("", model_ids)
 
     def test_empty_model_mapped_to_unknown_in_daily(self):
         data = get_dashboard_data(db_path=self.db_path)
