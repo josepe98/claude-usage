@@ -322,12 +322,12 @@ def get_dashboard_data(db_path=None):
 
     # ── All models (for filter UI) ────────────────────────────────────────────
     model_rows = conn.execute("""
-        SELECT COALESCE(NULLIF(model, ''), 'unknown') as model
+        SELECT COALESCE(NULLIF(model, ''), 'unknown') as model,
+               MIN(timestamp) as first_seen
         FROM turns
         GROUP BY model
-        ORDER BY SUM(input_tokens + output_tokens) DESC
     """).fetchall()
-    all_models = [r["model"] for r in model_rows]
+    all_models = [{"id": r["model"], "first_seen": r["first_seen"]} for r in model_rows]
 
     # ── Daily per-model, ALL history (client filters by range) ────────────────
     daily_rows = conn.execute("""
@@ -1550,42 +1550,53 @@ function setHourlyTZ(mode) {
 }
 
 // ── Model filter ───────────────────────────────────────────────────────────
-function modelPriority(m) {
+function modelLabel(m) {
   const ml = m.toLowerCase();
-  if (ml.includes('opus'))   return 0;
-  if (ml.includes('sonnet')) return 1;
-  if (ml.includes('haiku'))  return 2;
-  return 3;
+  // Extract tier
+  let tier = null;
+  if (ml.includes('haiku'))  tier = 'haiku';
+  else if (ml.includes('sonnet')) tier = 'sonnet';
+  else if (ml.includes('opus'))   tier = 'opus';
+  if (!tier) return m;
+  // Extract version number: prefer x.y pattern after the tier name
+  const vMatch = ml.match(new RegExp(tier + '[^0-9]*([0-9]+)[^0-9]+([0-9]+)'));
+  if (vMatch) return `${tier} ${vMatch[1]}.${vMatch[2]}`;
+  const vSingle = ml.match(new RegExp(tier + '[^0-9]*([0-9]+)'));
+  if (vSingle) return `${tier} ${vSingle[1]}`;
+  return tier;
 }
 
 function readURLModels(allModels) {
+  const ids = allModels.map(m => m.id);
   const param = new URLSearchParams(window.location.search).get('models');
   if (!param) {
-    const billable = allModels.filter(m => isBillable(m));
-    return new Set(billable.length > 0 ? billable : allModels);
+    const billable = ids.filter(id => isBillable(id));
+    return new Set(billable.length > 0 ? billable : ids);
   }
   const fromURL = new Set(param.split(',').map(s => s.trim()).filter(Boolean));
-  return new Set(allModels.filter(m => fromURL.has(m)));
+  return new Set(ids.filter(id => fromURL.has(id)));
 }
 
 function isDefaultModelSelection(allModels) {
-  const billable = allModels.filter(m => isBillable(m));
+  const billable = allModels.map(m => m.id).filter(id => isBillable(id));
   if (selectedModels.size !== billable.length) return false;
-  return billable.every(m => selectedModels.has(m));
+  return billable.every(id => selectedModels.has(id));
 }
 
 function buildFilterUI(allModels) {
   const sorted = [...allModels].sort((a, b) => {
-    const pa = modelPriority(a), pb = modelPriority(b);
-    return pa !== pb ? pa - pb : a.localeCompare(b);
+    if (a.first_seen && b.first_seen) return a.first_seen.localeCompare(b.first_seen);
+    if (a.first_seen) return -1;
+    if (b.first_seen) return 1;
+    return a.id.localeCompare(b.id);
   });
   selectedModels = readURLModels(allModels);
   const container = document.getElementById('model-checkboxes');
-  container.innerHTML = sorted.map(m => {
-    const checked = selectedModels.has(m);
-    return `<label class="model-cb-label ${checked ? 'checked' : ''}" data-model="${esc(m)}">
-      <input type="checkbox" value="${esc(m)}" ${checked ? 'checked' : ''} onchange="onModelToggle(this)">
-      ${esc(m)}
+  container.innerHTML = sorted.map(({id}) => {
+    const checked = selectedModels.has(id);
+    return `<label class="model-cb-label ${checked ? 'checked' : ''}" data-model="${esc(id)}">
+      <input type="checkbox" value="${esc(id)}" ${checked ? 'checked' : ''} onchange="onModelToggle(this)">
+      ${esc(modelLabel(id))}
     </label>`;
   }).join('');
 }
@@ -1616,10 +1627,10 @@ function clearAllModels() {
 
 // ── URL persistence ────────────────────────────────────────────────────────
 function updateURL() {
-  const allModels = Array.from(document.querySelectorAll('#model-checkboxes input')).map(cb => cb.value);
+  const allModelIds = Array.from(document.querySelectorAll('#model-checkboxes input')).map(cb => cb.value);
   const params = new URLSearchParams();
   if (selectedRange !== '30d') params.set('range', selectedRange);
-  if (!isDefaultModelSelection(allModels)) params.set('models', Array.from(selectedModels).join(','));
+  if (!isDefaultModelSelection(allModelIds.map(id => ({id})))) params.set('models', Array.from(selectedModels).join(','));
   const search = params.toString() ? '?' + params.toString() : '';
   history.replaceState(null, '', window.location.pathname + search);
 }
