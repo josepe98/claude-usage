@@ -306,6 +306,66 @@ def _compute_streak(conn, today=None):
     return streak
 
 
+def _session_sparklines(conn, session_ids):
+    """For each session id, return a 30-bin sparkline (turns per equal-width
+    time bucket) spanning the session's first_timestamp -> last_timestamp.
+    Returns {session_id: [int, int, ...]}."""
+    if not session_ids:
+        return {}
+    out = {}
+    placeholders = ",".join("?" * len(session_ids))
+    rows = conn.execute(f"""
+        SELECT t.session_id, t.timestamp
+        FROM turns t
+        WHERE t.session_id IN ({placeholders}) AND t.timestamp IS NOT NULL
+        ORDER BY t.session_id, t.timestamp ASC
+    """, tuple(session_ids)).fetchall()
+    # Group timestamps by session
+    by_sid = {}
+    for r in rows:
+        by_sid.setdefault(r["session_id"], []).append(r["timestamp"])
+    BINS = 30
+    for sid, ts in by_sid.items():
+        if len(ts) < 2:
+            out[sid] = [len(ts)]
+            continue
+        # Convert to epoch-ish ordinal for bucketing (lexicographic timestamps work too).
+        first, last = ts[0], ts[-1]
+        # We just use ordinal position over total — coarse but enough for sparkline.
+        bins = [0] * BINS
+        first_dt = first
+        last_dt = last
+        if first_dt == last_dt:
+            bins[BINS - 1] = len(ts)
+            out[sid] = bins
+            continue
+        # Map each ts to a bucket by ratio of (ts - first) / (last - first).
+        # Use ISO-8601 string comparison; it works monotonically for our data
+        # and avoids parsing. For the bin index we still need a numeric ratio
+        # — convert via datetime when feasible.
+        from datetime import datetime as _dt
+        try:
+            fdt = _dt.fromisoformat(first.replace("Z", "+00:00"))
+            ldt = _dt.fromisoformat(last.replace("Z", "+00:00"))
+            span = (ldt - fdt).total_seconds()
+        except Exception:
+            span = 0
+        if span <= 0:
+            bins[BINS - 1] = len(ts)
+            out[sid] = bins
+            continue
+        for t in ts:
+            try:
+                tdt = _dt.fromisoformat(t.replace("Z", "+00:00"))
+                ratio = (tdt - fdt).total_seconds() / span
+            except Exception:
+                ratio = 1.0
+            idx = min(int(ratio * BINS), BINS - 1)
+            bins[idx] += 1
+        out[sid] = bins
+    return out
+
+
 def get_dashboard_data(db_path=None):
     # Look up DB_PATH at call time, not at def time, so tests that patch
     # ``dashboard.DB_PATH`` (or ``scanner.DB_PATH``) are honoured.
@@ -455,6 +515,13 @@ def get_dashboard_data(db_path=None):
     for s in sessions_all:
         s["tags"] = _tags_map.get(s["session_id"], [])
     streak = _compute_streak(conn)
+
+    # Sparkline data per session (small turn-rate histogram for the UI).
+    _sparkline_data = _session_sparklines(
+        conn, [s["session_id"] for s in sessions_all]
+    )
+    for s in sessions_all:
+        s["sparkline"] = _sparkline_data.get(s["session_id"], [])
     conn.close()
 
     return {
@@ -957,8 +1024,6 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .tz-btn:last-child { border-right: none; }
   .tz-btn:hover { background: rgba(255,255,255,0.04); color: var(--text); }
   .tz-btn.active { background: rgba(217,119,87,0.15); color: var(--accent); }
-  .peak-legend { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--muted); }
-  .peak-swatch { width: 10px; height: 10px; background: rgba(248,113,113,0.8); border-radius: 2px; display: inline-block; }
 
   table { width: 100%; border-collapse: collapse; }
   th { text-align: left; padding: 8px 12px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); border-bottom: 1px solid var(--border); white-space: nowrap; }
@@ -1094,7 +1159,6 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <div class="chart-header">
         <h2 id="hourly-chart-title">Average Hourly Distribution</h2>
         <div class="chart-header-right">
-          <span class="peak-legend" title="Mon–Fri 05:00–11:00 PT — Anthropic peak-hour throttling window"><span class="peak-swatch"></span>Peak hours (PT)</span>
           <span class="chart-day-count" id="hourly-day-count"></span>
           <div class="tz-group">
             <button class="tz-btn" data-tz="local" onclick="setHourlyTZ('local')">Local</button>
@@ -1307,31 +1371,16 @@ let lastByModel = [];
 let sessionSortDir = 'desc';
 let hourlyTZ = (_loadPrefs().hourlyTZ) || 'local';  // 'local' or 'utc'
 
-// ── Peak-hour config ───────────────────────────────────────────────────────
-// Anthropic throttles Mon–Fri 05:00–11:00 PT. We approximate as fixed UTC hours
-// 12–17 (matches PDT; during PST the window shifts by 1h — accepted simplification).
-const PEAK_HOURS_UTC = new Set([12, 13, 14, 15, 16, 17]);
-
 // Local-timezone offset in hours (signed). Fractional offsets (e.g. India UTC+5:30)
 // are rounded to the nearest hour for bucket alignment.
 function localOffsetHours() {
   return Math.round(-new Date().getTimezoneOffset() / 60);
 }
 
-// Return the UTC hour (0–23) corresponding to a displayed-hour bucket.
-function displayHourToUTC(displayHour, tzMode) {
-  if (tzMode === 'utc') return displayHour;
-  return ((displayHour - localOffsetHours()) % 24 + 24) % 24;
-}
-
 // Return the displayed-hour bucket for a UTC hour.
 function utcHourToDisplay(utcHour, tzMode) {
   if (tzMode === 'utc') return utcHour;
   return ((utcHour + localOffsetHours()) % 24 + 24) % 24;
-}
-
-function isPeakHour(displayHour, tzMode) {
-  return PEAK_HOURS_UTC.has(displayHourToUTC(displayHour, tzMode));
 }
 
 function formatHourLabel(h) {
@@ -1922,7 +1971,6 @@ function aggregateHourly(rows, tzMode) {
       avgTurns:   dayCount ? byHour[h].turns  / dayCount : 0,
       avgOutput:  dayCount ? byHour[h].output / dayCount : 0,
       totalTurns: byHour[h].turns,
-      peak:       isPeakHour(h, tzMode),
     });
   }
   return { hours, dayCount };
@@ -1937,10 +1985,10 @@ function renderHourlyChart(agg) {
   const ctx = document.getElementById('chart-hourly').getContext('2d');
   if (charts.hourly) charts.hourly.destroy();
 
-  const labels = agg.hours.map(h => (h.peak ? '⚡ ' : '') + formatHourLabel(h.hour));
+  const labels = agg.hours.map(h => formatHourLabel(h.hour));
   const turns  = agg.hours.map(h => h.avgTurns);
   const output = agg.hours.map(h => h.avgOutput);
-  const barColors = agg.hours.map(h => h.peak ? 'rgba(248,113,113,0.8)' : tokenColors().input);
+  const barColors = tokenColors().input;
 
   charts.hourly = new Chart(ctx, {
     data: {
@@ -1979,8 +2027,7 @@ function renderHourlyChart(agg) {
               if (!items.length) return '';
               const idx = items[0].dataIndex;
               const h = agg.hours[idx];
-              const base = formatHourLabel(h.hour) + ' ' + tzDisplayName(hourlyTZ);
-              return h.peak ? base + ' · Peak — Anthropic US hours' : base;
+              return formatHourLabel(h.hour) + ' ' + tzDisplayName(hourlyTZ);
             },
             label: (item) => {
               if (item.dataset.label && item.dataset.label.indexOf('turns') !== -1) {
@@ -2139,6 +2186,15 @@ function renderDowHourHeatmap() {  // eslint-disable-line no-unused-vars
   el.innerHTML = cells.join("");
 }
 
+function _renderSparkline(bins) {  // eslint-disable-line no-unused-vars
+  if (!bins || !bins.length) return "";
+  const W = 60, H = 14;
+  const max = Math.max(1, ...bins);
+  const step = W / bins.length;
+  const pts = bins.map((v, i) => `${(i * step).toFixed(1)},${(H - (v / max) * H).toFixed(1)}`).join(" ");
+  return `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" style="vertical-align:middle;margin-left:4px;" aria-hidden="true"><polyline fill="none" stroke="var(--accent)" stroke-width="1" points="${pts}"></polyline></svg>`;
+}
+
 function renderProjectChart(byProject) {
   const top = byProject.slice(0, 10);
   const ctx = document.getElementById('chart-project').getContext('2d');
@@ -2172,8 +2228,8 @@ function renderSessionsTable(sessions) {
       : `<td class="cost-na">n/a</td>`;
     const tagLink = ` <a href="#" onclick="event.stopPropagation(); _promptTags('${esc(s.session_id)}'); return false;" style="font-size:10px;color:var(--muted);text-decoration:none;">tag</a>${_renderTags(s)}`;
     const sessionCell = s.session_name
-      ? `<td><span class="session-name">${esc(s.session_name)}</span> <span class="muted" style="font-family:monospace">(${esc(s.session_id)}&hellip;)</span>${tagLink}</td>`
-      : `<td class="muted" style="font-family:monospace">${esc(s.session_id)}&hellip;${tagLink}</td>`;
+      ? `<td><span class="session-name">${esc(s.session_name)}</span> <span class="muted" style="font-family:monospace">(${esc(s.session_id)}${_renderSparkline(s.sparkline)}&hellip;)</span>${tagLink}</td>`
+      : `<td class="muted" style="font-family:monospace">${esc(s.session_id)}${_renderSparkline(s.sparkline)}&hellip;${tagLink}</td>`;
     return `<tr class="session-row ${selectedSessionId === s.session_id_full ? 'selected' : ''}" data-session-id="${esc(s.session_id_full)}">
       ${sessionCell}
       <td>${esc(s.project)}</td>
