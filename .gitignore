@@ -1,2 +1,7 @@
 __pycache__/
 server.log
+
+# Local env files — never commit (ADM-041)
+.env
+.env.local
+.env.*.local
