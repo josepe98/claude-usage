@@ -568,9 +568,13 @@ def get_session_detail(session_id, db_path=None):
         ORDER BY timestamp ASC, id ASC
     """, (session_id,)).fetchall()
 
+    # Lazy import to avoid circular import at module load time.
+    from cli import calc_cost
+
     turns = []
     tool_usage = {}
     cwd_counts = {}
+    cum_cost = 0.0
 
     for r in turn_rows:
         tool_name = r["tool_name"] or "reply"
@@ -582,6 +586,15 @@ def get_session_detail(session_id, db_path=None):
             (r["cache_creation_tokens"] or 0) +
             (r["cache_1h_tokens"] or 0)
         )
+        cost = calc_cost(
+            r["model"] or "",
+            r["input_tokens"] or 0,
+            r["output_tokens"] or 0,
+            r["cache_read_tokens"] or 0,
+            r["cache_creation_tokens"] or 0,
+            r["cache_1h_tokens"] or 0,
+        )
+        cum_cost += cost
         turns.append({
             "timestamp":       r["timestamp"] or "",
             "timestamp_short": (r["timestamp"] or "")[:16].replace("T", " "),
@@ -594,6 +607,8 @@ def get_session_detail(session_id, db_path=None):
             "cache_creation":  r["cache_creation_tokens"] or 0,
             "cache_1h":        r["cache_1h_tokens"] or 0,
             "total":           total_tokens,
+            "cost":            cost,
+            "cum_cost":        cum_cost,
         })
 
         stats = tool_usage.setdefault(tool_name, {"tool_name": tool_name, "turns": 0, "tokens": 0})
@@ -623,96 +638,13 @@ def get_session_detail(session_id, db_path=None):
         "output":         session["total_output_tokens"] or 0,
         "cache_read":     session["total_cache_read"] or 0,
         "cache_creation": session["total_cache_creation"] or 0,
+        "total_cost":     cum_cost,
         "tool_usage":     sorted(tool_usage.values(), key=lambda item: (-item["tokens"], item["tool_name"])),
         "cwd_usage":      sorted(
             [{"cwd": c, "turns": n} for c, n in cwd_counts.items()],
             key=lambda item: (-item["turns"], item["cwd"])
         ),
         "turn_history":   turns,
-    }
-
-
-def _session_detail(session_id_prefix, db_path=None):
-    """Extended drill-down payload used by the session modal.
-    Supports prefix matching on session_id and adds per-turn cost,
-    cumulative cost, and a tools breakdown — fields the canonical
-    ``get_session_detail`` doesn't expose.
-    """
-    if db_path is None:
-        db_path = DB_PATH
-    if not db_path.exists():
-        return {"error": "Database not found. Run: python3 cli.py scan"}
-
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    session = conn.execute("""
-        SELECT
-            session_id, project_name, first_timestamp, last_timestamp, git_branch,
-            total_input_tokens, total_output_tokens,
-            total_cache_read, total_cache_creation, model, turn_count
-        FROM sessions
-        WHERE session_id LIKE ?
-        LIMIT 1
-    """, (session_id_prefix + "%",)).fetchone()
-
-    if session is None:
-        conn.close()
-        return {"error": "Session not found"}
-
-    turn_rows = conn.execute("""
-        SELECT
-            timestamp, model, input_tokens, output_tokens,
-            cache_read_tokens, cache_creation_tokens, cache_1h_tokens, tool_name
-        FROM turns
-        WHERE session_id = ?
-        ORDER BY timestamp ASC, id ASC
-    """, (session["session_id"],)).fetchall()
-
-    from cli import calc_cost
-
-    timeline = []
-    tools_count = {}
-    cum_cost = 0.0
-    for r in turn_rows:
-        tool = r["tool_name"] or ""
-        tokens = (
-            (r["input_tokens"] or 0)
-            + (r["output_tokens"] or 0)
-            + (r["cache_read_tokens"] or 0)
-            + (r["cache_creation_tokens"] or 0)
-            + (r["cache_1h_tokens"] or 0)
-        )
-        cost = calc_cost(
-            r["model"] or "",
-            r["input_tokens"] or 0,
-            r["output_tokens"] or 0,
-            r["cache_read_tokens"] or 0,
-            r["cache_creation_tokens"] or 0,
-            r["cache_1h_tokens"] or 0,
-        )
-        cum_cost += cost
-        timeline.append({
-            "timestamp": r["timestamp"] or "",
-            "model":     r["model"] or "",
-            "tokens":    tokens,
-            "cost":      cost,
-            "cum_cost":  cum_cost,
-            "tool":      tool,
-        })
-        if tool:
-            tools_count[tool] = tools_count.get(tool, 0) + 1
-
-    conn.close()
-
-    return {
-        "session":           dict(session),
-        "turn_count_actual": len(timeline),
-        "total_cost":        cum_cost,
-        "timeline":          timeline,
-        "tools_breakdown": [
-            {"tool": t, "count": c}
-            for t, c in sorted(tools_count.items(), key=lambda kv: -kv[1])
-        ],
     }
 
 
@@ -1128,7 +1060,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
   tr.session-row { cursor: pointer; }
   tr.session-row.selected td { background: rgba(0,113,227,0.06); }
-  .detail-grid { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.8fr); gap: 16px; }
+  .detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
   .detail-card { background: rgba(0,0,0,0.02); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
   .detail-card h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin-bottom: 12px; }
   .detail-meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 16px; }
@@ -1166,15 +1098,6 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 </style>
 </head>
 <body>
-<div id="session-modal" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.65); z-index:1000; align-items:center; justify-content:center;" onclick="if(event.target===this) _closeSessionModal()">
-  <div style="background:var(--card); border-radius:12px; padding:24px; max-width:900px; width:90%; max-height:80vh; overflow-y:auto; color:var(--text);">
-    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
-      <h2 id="session-modal-title" style="margin:0;">Session</h2>
-      <button onclick="_closeSessionModal()" style="background:none; border:none; color:var(--muted); font-size:24px; cursor:pointer;">&times;</button>
-    </div>
-    <div id="session-modal-body"></div>
-  </div>
-</div>
 <header>
   <h1>Claude Code Usage Dashboard</h1>
   <div style="display:flex;align-items:center;gap:12px">
@@ -1929,44 +1852,45 @@ function renderSessionDetail(detail) {
       <div><div class="label">Session</div><div class="value" style="font-family:monospace">${esc(detail.session_id)}</div></div>
       <div><div class="label">Project</div><div class="value">${esc(detail.project)}</div></div>
       <div><div class="label">Branch</div><div class="value">${esc(detail.branch || 'n/a')}</div></div>
-      <div><div class="label">Model</div><div class="value">${esc(detail.model)}</div></div>
+      <div><div class="label">Model</div><div class="value">${esc(modelLabel(detail.model))}</div></div>
       <div><div class="label">First Seen</div><div class="value">${esc(detail.first)}</div></div>
       <div><div class="label">Last Seen</div><div class="value">${esc(detail.last)}</div></div>
       <div><div class="label">Duration</div><div class="value">${esc(String(detail.duration_min))}m</div></div>
       <div><div class="label">Tokens</div><div class="value">${fmt(detail.input + detail.output + detail.cache_read + detail.cache_creation)}</div></div>
+      <div><div class="label">Total Cost</div><div class="value">${fmtCostBig(detail.total_cost || 0)}</div></div>
+    </div>
+    <div class="detail-card" style="margin-bottom:16px;">
+      <h3>Turn History</h3>
+      <div class="detail-table-wrap">
+        <table>
+          <thead><tr>
+            <th>Time</th><th>Tool</th><th>Model</th><th>Input</th><th>Output</th><th>Cache Read</th><th>Cache Write</th><th>Total</th><th>Cost</th><th>Cum cost</th>
+          </tr></thead>
+          <tbody>${detail.turn_history.map(t => `
+            <tr>
+              <td class="muted">${esc(t.timestamp_short)}</td>
+              <td>${esc(t.tool_name)}</td>
+              <td>${esc(modelLabel(t.model))}</td>
+              <td class="num">${fmt(t.input)}</td>
+              <td class="num">${fmt(t.output)}</td>
+              <td class="num">${fmt(t.cache_read)}</td>
+              <td class="num">${fmt((t.cache_creation || 0) + (t.cache_1h || 0))}</td>
+              <td class="num">${fmt(t.total)}</td>
+              <td class="num">${fmtCost(t.cost || 0)}</td>
+              <td class="num muted">${fmtCostBig(t.cum_cost || 0)}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
     </div>
     <div class="detail-grid">
       <div class="detail-card">
-        <h3>Turn History</h3>
-        <div class="detail-table-wrap">
-          <table>
-            <thead><tr>
-              <th>Time</th><th>Tool</th><th>Model</th><th>Input</th><th>Output</th><th>Cache Read</th><th>Cache Write</th><th>Total</th>
-            </tr></thead>
-            <tbody>${detail.turn_history.map(t => `
-              <tr>
-                <td class="muted">${esc(t.timestamp_short)}</td>
-                <td>${esc(t.tool_name)}</td>
-                <td>${esc(t.model)}</td>
-                <td class="num">${fmt(t.input)}</td>
-                <td class="num">${fmt(t.output)}</td>
-                <td class="num">${fmt(t.cache_read)}</td>
-                <td class="num">${fmt((t.cache_creation || 0) + (t.cache_1h || 0))}</td>
-                <td class="num">${fmt(t.total)}</td>
-              </tr>`).join('')}
-            </tbody>
-          </table>
-        </div>
+        <h3>Tool Usage</h3>
+        <div class="pill-list">${toolPills}</div>
       </div>
-      <div>
-        <div class="detail-card" style="margin-bottom:16px;">
-          <h3>Tool Usage</h3>
-          <div class="pill-list">${toolPills}</div>
-        </div>
-        <div class="detail-card">
-          <h3>Working Directories</h3>
-          <div class="pill-list">${cwdPills}</div>
-        </div>
+      <div class="detail-card">
+        <h3>Working Directories</h3>
+        <div class="pill-list">${cwdPills}</div>
       </div>
     </div>`;
 }
@@ -2262,72 +2186,6 @@ function renderDowHourHeatmap() {  // eslint-disable-line no-unused-vars
   el.innerHTML = cells.join("");
 }
 
-function _openSession(sid) {  // eslint-disable-line no-unused-vars
-  // Uses /api/session-detail (the extended payload) so the modal can render
-  // timeline + cumulative cost + tools breakdown in one round-trip.
-  fetch("/api/session-detail?session_id=" + encodeURIComponent(sid))
-    .then(r => r.json())
-    .then(d => _renderSessionModal(sid, d))
-    .catch(e => alert("Could not load session: " + e));
-}
-
-function _renderSessionModal(sid, d) {  // eslint-disable-line no-unused-vars
-  const modal = document.getElementById("session-modal");
-  const body = document.getElementById("session-modal-body");
-  const title = document.getElementById("session-modal-title");
-  if (!modal || !body) return;
-  if (d.error) {
-    body.innerHTML = `<p style="color:#f87171;">${esc(d.error)}</p>`;
-  } else {
-    const s = d.session || {};
-    title.textContent = "Session " + sid + (s.project_name ? " — " + s.project_name : "");
-    const tools = (d.tools_breakdown || []).map(t =>
-      `<li>${esc(t.tool)} <span style="color:var(--muted);">(${t.count})</span></li>`
-    ).join("");
-    const lastFew = (d.timeline || []).slice(-30);
-    const rows = lastFew.map(t => `
-      <tr>
-        <td style="font-family:monospace;font-size:11px;">${(t.timestamp || "").slice(11,19)}</td>
-        <td>${esc(t.model || "")}</td>
-        <td style="text-align:right;">${(t.tokens || 0).toLocaleString()}</td>
-        <td style="text-align:right;">$${(t.cost || 0).toFixed(4)}</td>
-        <td style="text-align:right; color:var(--muted);">$${(t.cum_cost || 0).toFixed(2)}</td>
-        <td style="color:var(--muted);">${esc(t.tool || "")}</td>
-      </tr>
-    `).join("");
-    body.innerHTML = `
-      <div style="display:flex; gap: 24px; font-size:12px; color:var(--muted); margin-bottom:16px;">
-        <div>Project: <strong style="color:var(--text);">${esc(s.project_name || "?")}</strong></div>
-        <div>Branch: <strong style="color:var(--text);">${esc(s.git_branch || "—")}</strong></div>
-        <div>Model: <strong style="color:var(--text);">${esc(s.model || "?")}</strong></div>
-        <div>Turns: <strong style="color:var(--text);">${d.turn_count_actual}</strong></div>
-        <div>Total cost: <strong style="color:#4ade80;">$${(d.total_cost || 0).toFixed(4)}</strong></div>
-      </div>
-      <h3 style="margin: 12px 0 4px;">Tools used</h3>
-      <ul style="margin: 0 0 16px 0; padding-left: 20px;">${tools || "<li style='color:var(--muted)'>none</li>"}</ul>
-      <h3 style="margin: 16px 0 4px;">Last ${lastFew.length} turns</h3>
-      <table style="width:100%; font-size:11px; border-collapse:collapse;">
-        <thead><tr style="color:var(--muted); text-align:left;">
-          <th>Time</th><th>Model</th><th style="text-align:right;">Tokens</th>
-          <th style="text-align:right;">Cost</th><th style="text-align:right;">Cum</th><th>Tool</th>
-        </tr></thead>
-        <tbody>${rows || "<tr><td colspan='6' style='color:var(--muted);'>No turns</td></tr>"}</tbody>
-      </table>
-    `;
-  }
-  modal.style.display = "flex";
-}
-
-function _closeSessionModal() {  // eslint-disable-line no-unused-vars
-  const m = document.getElementById("session-modal");
-  if (m) m.style.display = "none";
-}
-
-// Esc closes the modal
-document.addEventListener("keydown", e => {
-  if (e.key === "Escape") _closeSessionModal();
-});
-
 function _renderSparkline(bins) {  // eslint-disable-line no-unused-vars
   if (!bins || !bins.length) return "";
   const W = 60, H = 14;
@@ -2370,14 +2228,14 @@ function renderSessionsTable(sessions) {
       : `<td class="cost-na">n/a</td>`;
     const tagLink = ` <a href="#" onclick="event.stopPropagation(); _promptTags('${esc(s.session_id)}'); return false;" style="font-size:10px;color:var(--muted);text-decoration:none;">tag</a>${_renderTags(s)}`;
     const sessionCell = s.session_name
-      ? `<td><span class="session-name">${esc(s.session_name)}</span> <span class="muted" style="font-family:monospace">(<a href="#" onclick="_openSession('${s.session_id}'); return false;" style="color:var(--accent); text-decoration:none;">${esc(s.session_id)}</a>${_renderSparkline(s.sparkline)}&hellip;)</span>${tagLink}</td>`
-      : `<td class="muted" style="font-family:monospace"><a href="#" onclick="_openSession('${s.session_id}'); return false;" style="color:var(--accent); text-decoration:none;">${esc(s.session_id)}</a>${_renderSparkline(s.sparkline)}&hellip;${tagLink}</td>`;
+      ? `<td><span class="session-name">${esc(s.session_name)}</span> <span class="muted" style="font-family:monospace">(${esc(s.session_id)}${_renderSparkline(s.sparkline)}&hellip;)</span>${tagLink}</td>`
+      : `<td class="muted" style="font-family:monospace">${esc(s.session_id)}${_renderSparkline(s.sparkline)}&hellip;${tagLink}</td>`;
     return `<tr class="session-row ${selectedSessionId === s.session_id_full ? 'selected' : ''}" data-session-id="${esc(s.session_id_full)}">
       ${sessionCell}
       <td>${esc(s.project)}</td>
       <td class="muted">${esc(s.last)}</td>
       <td class="muted">${esc(s.duration_min)}m</td>
-      <td><span class="model-tag">${esc(s.model)}</span></td>
+      <td><span class="model-tag">${esc(modelLabel(s.model))}</span></td>
       <td class="num">${s.turns}</td>
       <td class="num">${fmt(s.input)}</td>
       <td class="num">${fmt(s.output)}</td>
@@ -2430,7 +2288,7 @@ function renderModelCostTable(byModel) {
       ? `<td class="cost">${fmtCost(cost)}</td>`
       : `<td class="cost-na">n/a</td>`;
     return `<tr>
-      <td><span class="model-tag">${esc(m.model)}</span></td>
+      <td><span class="model-tag">${esc(modelLabel(m.model))}</span></td>
       <td class="num">${fmt(m.turns)}</td>
       <td class="num">${fmt(m.input)}</td>
       <td class="num">${fmt(m.output)}</td>
@@ -2892,19 +2750,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
             parsed_url = urlparse(self.path)
             session_id = parse_qs(parsed_url.query).get("session_id", [""])[0]
             data = get_session_detail(session_id)
-            body = json.dumps(data).encode("utf-8")
-            self.send_response(200 if "error" not in data else 404)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-
-        elif path == "/api/session-detail":
-            # Extended drill-down payload used by the session modal:
-            # prefix matching + per-turn cost, cumulative cost, tools breakdown.
-            parsed_url = urlparse(self.path)
-            session_id = parse_qs(parsed_url.query).get("session_id", [""])[0]
-            data = _session_detail(session_id)
             body = json.dumps(data).encode("utf-8")
             self.send_response(200 if "error" not in data else 404)
             self.send_header("Content-Type", "application/json")
