@@ -8,6 +8,7 @@ Commands:
   dashboard - Scan + open browser + start dashboard server
 """
 
+import json
 import os
 import sys
 import sqlite3
@@ -550,28 +551,45 @@ def cmd_theme():
             sys.exit(1)
 
         print("Generating CSS with Claude API...")
-        prompt = f"""You are converting a design system description into CSS custom properties for a data dashboard.
+        prompt = f"""You are converting the {catalog_entry['name']} design system into CSS custom properties for a data dashboard.
 
-Given the DESIGN.md below, produce a CSS :root {{ }} block with EXACTLY these variables:
-  --bg            page background color
+Read the DESIGN.md carefully — extract not just color, but also the brand's typography choices, density, corner sharpness, and motion language. Don't default to Apple-like values; if the brand is angular, dense, or unpolished, that should come through.
+
+Produce a CSS :root {{ }} block with EXACTLY these variables:
+
+COLORS
+  --bg            page background
   --card          card / surface background
-  --border        border color (prefer rgba with low opacity)
-  --text          primary text color
-  --muted         secondary / muted text color (prefer rgba)
+  --border        border color (low-opacity rgba preferred)
+  --text          primary text
+  --muted         secondary text (low-opacity rgba preferred)
   --accent        primary interactive / accent color
-  --green         positive number color (for financial figures)
-  --shadow        box-shadow value for cards
-  --chart-label   color for chart axis labels (must be legible on --bg)
-  --chart-grid    color for chart grid lines (subtle, low opacity)
+  --green         positive-number color (for financial figures, may differ from accent)
+  --shadow        box-shadow for cards ("none" if the brand is flat/borderless)
+  --chart-label   chart axis label color (must be legible on --bg)
+  --chart-grid    chart gridline color (subtle, low opacity)
+  --chart-1, --chart-2, --chart-3, --chart-4    four chart-series colors, brand-derived if possible
+
+SHAPE
+  --card-radius   card corner radius in px (Apple→14, Notion→6, Vercel→4, retro/industrial brands→0–2)
+  --card-border   card border value or "none" (use "none" if cards rely on --shadow instead)
+  --radius-sm     small element radius in px for buttons/badges (usually half --card-radius)
+
+TYPOGRAPHY
+  --font-family           font stack — lead with the brand's actual typeface if it has one (e.g. SF Pro, Geist, Inter, Sohne, IBM Plex, GT America, Helvetica Now), and ALWAYS end with system fallbacks: -apple-system, "Helvetica Neue", Arial, sans-serif
+  --letter-spacing-tight  body/heading tracking. Apple-like brands use ~-0.022em, Vercel-tight ~-0.025em, neutral brands use 0, industrial/condensed brands can use 0.01em positive tracking
+
+MOTION
+  --transition    one timing+easing for hover/focus, e.g. "0.18s cubic-bezier(0.4, 0, 0.2, 1)" for Apple-smooth, "0.1s ease-out" for snappy Linear-style, "0.25s ease" for slower enterprise feel
 
 Output ONLY the :root {{ }} block — no explanation, no markdown fences, no other text.
 
 DESIGN.md:
-{design_md[:8000]}"""
+{design_md[:10000]}"""
 
         payload = json.dumps({
             "model": "claude-haiku-4-5-20251001",
-            "max_tokens": 512,
+            "max_tokens": 1024,
             "messages": [{"role": "user", "content": prompt}]
         }).encode("utf-8")
 
