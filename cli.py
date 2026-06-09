@@ -537,7 +537,7 @@ def cmd_theme():
             sys.exit(1)
 
         # Fetch the DESIGN.md from awesome-design-md
-        design_url = f"https://raw.githubusercontent.com/VoltAgent/awesome-design-md/main/design-md/{theme_id}/README.md"
+        design_url = f"https://raw.githubusercontent.com/VoltAgent/awesome-design-md/main/design-md/{theme_id}/DESIGN.md"
         print(f"Fetching design system for '{theme_id}'...")
         try:
             with urllib.request.urlopen(design_url, timeout=15) as r:
