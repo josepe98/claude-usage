@@ -1,0 +1,94 @@
+# Default values for claude-usage.
+# This is a YAML-formatted file.
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/jakduch/claude-usage
+  tag: ""  # defaults to .Chart.AppVersion if empty
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+
+podSecurityContext:
+  fsGroup: 1000
+  runAsNonRoot: true
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: false
+  runAsNonRoot: true
+  runAsUser: 1000
+
+service:
+  type: ClusterIP
+  port: 8090
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+    # kubernetes.io/ingress.class: nginx
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+  hosts:
+    - host: claude-usage.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+    # - secretName: claude-usage-tls
+    #   hosts:
+    #     - claude-usage.local
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+persistence:
+  enabled: true
+  # Storage class for the PVC. Leave empty to use the cluster default.
+  storageClass: ""
+  accessModes:
+    - ReadWriteOnce
+  size: 1Gi
+  # Path inside the container where ~/.claude lives. Matches HOME of the runtime user.
+  mountPath: /home/claude/.claude
+  # Optional: bind an existing PVC instead of creating one.
+  existingClaim: ""
+
+# Environment-variable overrides for the dashboard. CU_HOST / CU_PORT are always set
+# from .Values.service.port; anything listed here is appended verbatim.
+env: []
+  # - name: CU_LOG_LEVEL
+  #   value: INFO
+
+# Liveness / readiness probes hit /api/health on the service port.
+probes:
+  liveness:
+    enabled: true
+    initialDelaySeconds: 15
+    periodSeconds: 20
+  readiness:
+    enabled: true
+    initialDelaySeconds: 5
+    periodSeconds: 10
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
