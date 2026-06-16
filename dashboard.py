@@ -6,6 +6,9 @@ import json
 import os
 import sqlite3
 import subprocess
+import time
+import urllib.request
+import urllib.error
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 from pathlib import Path
@@ -213,6 +216,92 @@ def get_themes():
         except Exception:
             pass
     return list(themes.values())
+
+
+
+# ── Currency / FX rates ──────────────────────────────────────────────────────────────────────────
+# Primary source: open.er-api.com (https://www.exchangerate-api.com/) — open,
+# no-key, ~160+ ISO-4217 currencies. Frankfurter (~30 ECB-tracked currencies)
+# is used as a fallback when the primary source fails.
+# Results are cached in-process for 6 hours; the frontend also caches in
+# localStorage for 24 hours.
+FX_CACHE_TTL_SECONDS = 6 * 60 * 60
+_FX_CACHE = {"data": None, "fetched_at": 0.0}
+
+
+def _fx_urlopen(url, timeout=5):
+    """Thin wrapper around urllib.request.urlopen so tests can patch a single symbol.
+    Some FX providers (e.g. frankfurter.app) reject the default Python-urllib
+    User-Agent with HTTP 403, so we pass an explicit UA on every request."""
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "claude-usage-dashboard/1.0 (+https://github.com/josepe98/claude-usage)",
+        "Accept": "application/json",
+    })
+    return urllib.request.urlopen(req, timeout=timeout)
+
+
+def _fetch_fx_rates(base="USD", target_currencies=None):
+    """Fetch latest FX rates with fallback chain.
+
+    Primary: open.er-api.com (~160+ currencies, no key).
+    Fallback: api.frankfurter.app (~30 ECB-tracked currencies).
+
+    Returns a dict like {"base": "USD", "date": "2026-05-23",
+    "rates": {"EUR": 0.92, ...}, "as_of": <iso ts>, "source": "open.er-api.com"},
+    or None on failure of all providers.
+    Uses an in-process cache for FX_CACHE_TTL_SECONDS (default 6h).
+    """
+    now = time.time()
+    cached = _FX_CACHE.get("data")
+    if cached and (now - _FX_CACHE.get("fetched_at", 0)) < FX_CACHE_TTL_SECONDS:
+        return cached
+
+    rates = None
+    date = None
+    source = None
+
+    # Try open.er-api.com first — gives ~160+ ISO-4217 currencies.
+    try:
+        url = "https://open.er-api.com/v6/latest/" + base
+        with _fx_urlopen(url, timeout=5) as resp:
+            raw = resp.read()
+        parsed = json.loads(raw)
+        if parsed.get("result") == "success" and isinstance(parsed.get("rates"), dict):
+            rates = dict(parsed["rates"])
+            date = parsed.get("time_last_update_utc") or parsed.get("time_last_update")
+            source = "open.er-api.com"
+    except Exception:  # noqa: BLE001 - network/JSON failures both -> fall through
+        rates = None
+
+    # Fallback: frankfurter.app (smaller set, but reliable).
+    if rates is None:
+        try:
+            url = "https://api.frankfurter.app/latest?from=" + base
+            with _fx_urlopen(url, timeout=5) as resp:
+                raw = resp.read()
+            parsed = json.loads(raw)
+            rates = dict(parsed.get("rates") or {})
+            date = parsed.get("date")
+            source = "frankfurter.app"
+        except Exception:  # noqa: BLE001
+            return None
+
+    if not rates:
+        return None
+
+    rates[base] = 1.0
+    if target_currencies:
+        rates = {k: v for k, v in rates.items() if k in set(target_currencies) | {base}}
+    out = {
+        "base": base,
+        "date": date,
+        "rates": rates,
+        "as_of": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "source": source,
+    }
+    _FX_CACHE["data"] = out
+    _FX_CACHE["fetched_at"] = now
+    return out
 
 
 def _cost_concentration(sessions_with_cost, top_n=5):
@@ -1008,6 +1097,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .streak-badge[hidden] { display: none; }
   .appearance-btn { background: transparent; border: 1px solid var(--border); border-radius: var(--radius-sm, 6px); color: var(--muted); font-size: 12px; padding: 4px 12px; cursor: pointer; letter-spacing: -0.12px; transition: all var(--transition, 0.15s ease); white-space: nowrap; }
   .appearance-btn:hover { border-color: var(--accent); color: var(--accent); }
+  select.appearance-btn { font-family: inherit; appearance: none; -webkit-appearance: none; padding-right: 22px; background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%); background-position: calc(100% - 12px) 50%, calc(100% - 7px) 50%; background-size: 5px 5px, 5px 5px; background-repeat: no-repeat; }
+  select.appearance-btn:hover { color: var(--accent); }
   .link-btn { background: transparent; border: none; color: var(--muted); cursor: pointer; font-size: 11px; padding: 4px 8px; }
   .link-btn:hover { color: var(--text); text-decoration: underline; }
   #rescan-btn { background: var(--card); border: 1px solid var(--border); color: var(--muted); padding: 4px 12px; border-radius: var(--radius-sm, 6px); cursor: pointer; font-size: 12px; transition: all var(--transition, 0.15s ease); }
@@ -1143,6 +1234,15 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <button class="link-btn" onclick="_resetPrefs()" title="Clear saved range / model / theme preferences and reload">Reset prefs</button>
     <button id="reset-btn" onclick="_confirmReset()" title="Delete usage.db entirely and re-create empty schema. Run scan afterwards to repopulate." style="background: var(--card); border: 1px solid var(--border); color: var(--muted); padding: 4px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; margin-left: 6px;">&#x1f5d1; Reset DB</button>
     <button id="rescan-btn" onclick="triggerRescan()" title="Rebuild the database from scratch by re-scanning all JSONL files. Use if data looks stale or costs seem wrong.">&#x21bb; Rescan</button>
+    <div id="currency-combobox" class="appearance-btn" style="position:relative; padding:0; display:inline-flex; align-items:center; cursor:pointer;" onclick="document.getElementById('currency-input').focus()">
+      <input id="currency-input" type="search" autocomplete="off" spellcheck="false"
+             placeholder="USD - click to change" aria-label="Display currency"
+             title="Display currency (FX rates from open.er-api.com) - type to filter by code or name"
+             style="background:transparent; border:0; color:var(--text); font:inherit; padding:4px 10px; width:170px; outline:none; cursor:pointer;" />
+      <span id="currency-chevron" style="padding-right:8px; color:var(--muted); font-size:9px; pointer-events:none; user-select:none;">&#x25BC;</span>
+      <div id="currency-dropdown" role="listbox"
+           style="display:none; position:absolute; top:calc(100% + 4px); right:0; min-width:280px; max-height:340px; overflow-y:auto; background:var(--card); border:1px solid var(--border); border-radius:8px; box-shadow:0 8px 24px rgba(0,0,0,0.18); z-index:9999; padding:4px 0; font-size:12px;"></div>
+    </div>
     <button class="appearance-btn" onclick="window.open('/themes','_blank')">Appearance</button>
     <select id="theme-quick" onchange="_onThemeQuickChange(this.value)" title="Quick-switch theme" style="background: var(--card); border: 1px solid var(--border); border-radius: 6px; color: var(--text); padding: 4px 8px; font-size: 12px; margin-right: 6px;"></select>
   </div>
@@ -1301,6 +1401,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       License: MIT
       {git_hash_html}
     </p>
+    <p id="fx-footer" style="display:none">FX rates from <a id="fx-source-link" href="https://www.exchangerate-api.com" target="_blank"><span id="fx-source">open.er-api.com</span></a> &middot; updated <span id="fx-asof">?</span></p>
   </div>
 </footer>
 
@@ -1481,8 +1582,468 @@ function fmt(n) {
   if (n >= 1e3) return (n/1e3).toFixed(1)+'K';
   return n.toLocaleString();
 }
-function fmtCost(c)    { return '$' + c.toFixed(4); }
-function fmtCostBig(c) { return '$' + c.toFixed(2); }
+// ── Currency / FX (USD-based; rates come from /api/fx-rates) ──────────────
+const FX_LS_KEY            = 'fx_rates_v2';  // v2 = open.er-api.com (~170), bump invalidates stale frankfurter (~30) caches
+const FX_CURRENCY_LS_KEY   = 'fx_currency';
+const FX_CLIENT_TTL_MS     = 24 * 60 * 60 * 1000;  // 24h
+const CURRENCY_SYMBOLS = {
+  USD: '$', EUR: '€', GBP: '£', JPY: '¥', CNY: '¥',
+  CHF: 'CHF ', CAD: 'C$', AUD: 'A$', NZD: 'NZ$', SGD: 'S$', HKD: 'HK$',
+  CZK: ' Kč', PLN: ' zł', SEK: ' kr', NOK: ' kr',
+  DKK: ' kr', HUF: ' Ft', RON: ' lei', BGN: ' lv',
+  ISK: ' kr', INR: '₹', KRW: '₩', BRL: 'R$', MXN: 'Mex$',
+  ZAR: 'R', TRY: '₺', ILS: '₪', THB: '฿', PHP: '₱',
+  IDR: 'Rp', MYR: 'RM',
+  TWD: 'NT$', VND: '₫', UAH: '₴', NGN: '₦', KZT: '₸',
+  GEL: '₾', AZN: '₼', AMD: '֏', BYN: 'Br', RUB: '₽',
+  PKR: '₨', LKR: 'Rs', NPR: 'Rs', BDT: '৳', EGP: 'E£',
+  LBP: 'L£', SAR: '﷼', QAR: '﷼', AED: 'AED ', KWD: 'KD ',
+  BHD: 'BD ', OMR: 'OMR ', JOD: 'JD ', IQD: 'IQD ', IRR: '﷼',
+  KES: 'KSh ', MAD: 'DH ', COP: 'Col$', CLP: 'CLP$', PEN: 'S/',
+  ARS: 'AR$', UYU: '$U',
+};
+// Symbols that follow the number (with a leading thin space).
+const SYMBOL_SUFFIX = new Set(['CZK','PLN','SEK','NOK','DKK','HUF','RON','BGN','ISK','CHF']);
+// Currency metadata (name + flag) for the searchable combobox. Top ~60 by
+// frequency + extended long-tail coverage. Currencies returned by the FX API
+// but not in this map fall back to {name: code, flag: ''} at render time.
+const CURRENCIES_META = {
+  USD: {name: 'US Dollar', flag: '🇺🇸'},
+  EUR: {name: 'Euro', flag: '🇪🇺'},
+  GBP: {name: 'British Pound Sterling', flag: '🇬🇧'},
+  JPY: {name: 'Japanese Yen', flag: '🇯🇵'},
+  CHF: {name: 'Swiss Franc', flag: '🇨🇭'},
+  CAD: {name: 'Canadian Dollar', flag: '🇨🇦'},
+  AUD: {name: 'Australian Dollar', flag: '🇦🇺'},
+  NZD: {name: 'New Zealand Dollar', flag: '🇳🇿'},
+  CNY: {name: 'Chinese Yuan Renminbi', flag: '🇨🇳'},
+  HKD: {name: 'Hong Kong Dollar', flag: '🇭🇰'},
+  SGD: {name: 'Singapore Dollar', flag: '🇸🇬'},
+  INR: {name: 'Indian Rupee', flag: '🇮🇳'},
+  KRW: {name: 'South Korean Won', flag: '🇰🇷'},
+  MXN: {name: 'Mexican Peso', flag: '🇲🇽'},
+  BRL: {name: 'Brazilian Real', flag: '🇧🇷'},
+  RUB: {name: 'Russian Ruble', flag: '🇷🇺'},
+  ZAR: {name: 'South African Rand', flag: '🇿🇦'},
+  TRY: {name: 'Turkish Lira', flag: '🇹🇷'},
+  AED: {name: 'UAE Dirham', flag: '🇦🇪'},
+  SAR: {name: 'Saudi Riyal', flag: '🇸🇦'},
+  NOK: {name: 'Norwegian Krone', flag: '🇳🇴'},
+  SEK: {name: 'Swedish Krona', flag: '🇸🇪'},
+  DKK: {name: 'Danish Krone', flag: '🇩🇰'},
+  PLN: {name: 'Polish Złoty', flag: '🇵🇱'},
+  CZK: {name: 'Czech Koruna', flag: '🇨🇿'},
+  HUF: {name: 'Hungarian Forint', flag: '🇭🇺'},
+  RON: {name: 'Romanian Leu', flag: '🇷🇴'},
+  ILS: {name: 'Israeli New Shekel', flag: '🇮🇱'},
+  MYR: {name: 'Malaysian Ringgit', flag: '🇲🇾'},
+  THB: {name: 'Thai Baht', flag: '🇹🇭'},
+  IDR: {name: 'Indonesian Rupiah', flag: '🇮🇩'},
+  PHP: {name: 'Philippine Peso', flag: '🇵🇭'},
+  VND: {name: 'Vietnamese Đồng', flag: '🇻🇳'},
+  EGP: {name: 'Egyptian Pound', flag: '🇪🇬'},
+  NGN: {name: 'Nigerian Naira', flag: '🇳🇬'},
+  KES: {name: 'Kenyan Shilling', flag: '🇰🇪'},
+  MAD: {name: 'Moroccan Dirham', flag: '🇲🇦'},
+  COP: {name: 'Colombian Peso', flag: '🇨🇴'},
+  CLP: {name: 'Chilean Peso', flag: '🇨🇱'},
+  PEN: {name: 'Peruvian Sol', flag: '🇵🇪'},
+  ARS: {name: 'Argentine Peso', flag: '🇦🇷'},
+  UYU: {name: 'Uruguayan Peso', flag: '🇺🇾'},
+  PKR: {name: 'Pakistani Rupee', flag: '🇵🇰'},
+  BDT: {name: 'Bangladeshi Taka', flag: '🇧🇩'},
+  LKR: {name: 'Sri Lankan Rupee', flag: '🇱🇰'},
+  NPR: {name: 'Nepalese Rupee', flag: '🇳🇵'},
+  TWD: {name: 'New Taiwan Dollar', flag: '🇹🇼'},
+  QAR: {name: 'Qatari Riyal', flag: '🇶🇦'},
+  KWD: {name: 'Kuwaiti Dinar', flag: '🇰🇼'},
+  BHD: {name: 'Bahraini Dinar', flag: '🇧🇭'},
+  OMR: {name: 'Omani Rial', flag: '🇴🇲'},
+  JOD: {name: 'Jordanian Dinar', flag: '🇯🇴'},
+  LBP: {name: 'Lebanese Pound', flag: '🇱🇧'},
+  IQD: {name: 'Iraqi Dinar', flag: '🇮🇶'},
+  IRR: {name: 'Iranian Rial', flag: '🇮🇷'},
+  UAH: {name: 'Ukrainian Hryvnia', flag: '🇺🇦'},
+  KZT: {name: 'Kazakhstani Tenge', flag: '🇰🇿'},
+  BYN: {name: 'Belarusian Ruble', flag: '🇧🇾'},
+  GEL: {name: 'Georgian Lari', flag: '🇬🇪'},
+  AMD: {name: 'Armenian Dram', flag: '🇦🇲'},
+  // Extended long-tail (smaller volume, still searchable):
+  AZN: {name: 'Azerbaijani Manat', flag: '🇦🇿'},
+  AFN: {name: 'Afghan Afghani', flag: '🇦🇫'},
+  ALL: {name: 'Albanian Lek', flag: '🇦🇱'},
+  ANG: {name: 'Netherlands Antillean Guilder', flag: ''},
+  AOA: {name: 'Angolan Kwanza', flag: '🇦🇴'},
+  AWG: {name: 'Aruban Florin', flag: '🇦🇼'},
+  BAM: {name: 'Bosnia-Herzegovina Convertible Mark', flag: '🇧🇦'},
+  BBD: {name: 'Barbadian Dollar', flag: '🇧🇧'},
+  BGN: {name: 'Bulgarian Lev', flag: '🇧🇬'},
+  BIF: {name: 'Burundian Franc', flag: '🇧🇮'},
+  BMD: {name: 'Bermudan Dollar', flag: '🇧🇲'},
+  BND: {name: 'Brunei Dollar', flag: '🇧🇳'},
+  BOB: {name: 'Bolivian Boliviano', flag: '🇧🇴'},
+  BSD: {name: 'Bahamian Dollar', flag: '🇧🇸'},
+  BTN: {name: 'Bhutanese Ngultrum', flag: '🇧🇹'},
+  BWP: {name: 'Botswanan Pula', flag: '🇧🇼'},
+  BZD: {name: 'Belize Dollar', flag: '🇧🇿'},
+  CDF: {name: 'Congolese Franc', flag: '🇨🇩'},
+  CRC: {name: 'Costa Rican Colón', flag: '🇨🇷'},
+  CUP: {name: 'Cuban Peso', flag: '🇨🇺'},
+  CVE: {name: 'Cape Verdean Escudo', flag: '🇨🇻'},
+  DJF: {name: 'Djiboutian Franc', flag: '🇩🇯'},
+  DOP: {name: 'Dominican Peso', flag: '🇩🇴'},
+  DZD: {name: 'Algerian Dinar', flag: '🇩🇿'},
+  ERN: {name: 'Eritrean Nakfa', flag: '🇪🇷'},
+  ETB: {name: 'Ethiopian Birr', flag: '🇪🇹'},
+  FJD: {name: 'Fijian Dollar', flag: '🇫🇯'},
+  FKP: {name: 'Falkland Islands Pound', flag: '🇫🇰'},
+  FOK: {name: 'Faroese Króna', flag: '🇫🇴'},
+  GGP: {name: 'Guernsey Pound', flag: ''},
+  GHS: {name: 'Ghanaian Cedi', flag: '🇬🇭'},
+  GIP: {name: 'Gibraltar Pound', flag: '🇬🇮'},
+  GMD: {name: 'Gambian Dalasi', flag: '🇬🇲'},
+  GNF: {name: 'Guinean Franc', flag: '🇬🇳'},
+  GTQ: {name: 'Guatemalan Quetzal', flag: '🇬🇹'},
+  GYD: {name: 'Guyanaese Dollar', flag: '🇬🇾'},
+  HNL: {name: 'Honduran Lempira', flag: '🇭🇳'},
+  HRK: {name: 'Croatian Kuna', flag: '🇭🇷'},
+  HTG: {name: 'Haitian Gourde', flag: '🇭🇹'},
+  IMP: {name: 'Isle of Man Pound', flag: ''},
+  ISK: {name: 'Icelandic Króna', flag: '🇮🇸'},
+  JEP: {name: 'Jersey Pound', flag: ''},
+  JMD: {name: 'Jamaican Dollar', flag: '🇯🇲'},
+  KGS: {name: 'Kyrgystani Som', flag: '🇰🇬'},
+  KHR: {name: 'Cambodian Riel', flag: '🇰🇭'},
+  KID: {name: 'Kiribati Dollar', flag: '🇰🇮'},
+  KMF: {name: 'Comorian Franc', flag: '🇰🇲'},
+  KYD: {name: 'Cayman Islands Dollar', flag: '🇰🇾'},
+  LAK: {name: 'Laotian Kip', flag: '🇱🇦'},
+  LRD: {name: 'Liberian Dollar', flag: '🇱🇷'},
+  LSL: {name: 'Lesotho Loti', flag: '🇱🇸'},
+  LYD: {name: 'Libyan Dinar', flag: '🇱🇾'},
+  MDL: {name: 'Moldovan Leu', flag: '🇲🇩'},
+  MGA: {name: 'Malagasy Ariary', flag: '🇲🇬'},
+  MKD: {name: 'Macedonian Denar', flag: '🇲🇰'},
+  MMK: {name: 'Myanma Kyat', flag: '🇲🇲'},
+  MNT: {name: 'Mongolian Tugrik', flag: '🇲🇳'},
+  MOP: {name: 'Macanese Pataca', flag: '🇲🇴'},
+  MRU: {name: 'Mauritanian Ouguiya', flag: '🇲🇷'},
+  MUR: {name: 'Mauritian Rupee', flag: '🇲🇺'},
+  MVR: {name: 'Maldivian Rufiyaa', flag: '🇲🇻'},
+  MWK: {name: 'Malawian Kwacha', flag: '🇲🇼'},
+  MZN: {name: 'Mozambican Metical', flag: '🇲🇿'},
+  NAD: {name: 'Namibian Dollar', flag: '🇳🇦'},
+  NIO: {name: 'Nicaraguan Córdoba', flag: '🇳🇮'},
+  PAB: {name: 'Panamanian Balboa', flag: '🇵🇦'},
+  PGK: {name: 'Papua New Guinean Kina', flag: '🇵🇬'},
+  PYG: {name: 'Paraguayan Guarani', flag: '🇵🇾'},
+  RSD: {name: 'Serbian Dinar', flag: '🇷🇸'},
+  RWF: {name: 'Rwandan Franc', flag: '🇷🇼'},
+  SBD: {name: 'Solomon Islands Dollar', flag: '🇸🇧'},
+  SCR: {name: 'Seychellois Rupee', flag: '🇸🇨'},
+  SDG: {name: 'Sudanese Pound', flag: '🇸🇩'},
+  SHP: {name: 'Saint Helena Pound', flag: '🇸🇭'},
+  SLE: {name: 'Sierra Leonean Leone', flag: '🇸🇱'},
+  SLL: {name: 'Sierra Leonean Leone (old)', flag: '🇸🇱'},
+  SOS: {name: 'Somali Shilling', flag: '🇸🇴'},
+  SRD: {name: 'Surinamese Dollar', flag: '🇸🇷'},
+  SSP: {name: 'South Sudanese Pound', flag: '🇸🇸'},
+  STN: {name: 'São Tomé and Príncipe Dobra', flag: '🇸🇹'},
+  SYP: {name: 'Syrian Pound', flag: '🇸🇾'},
+  SZL: {name: 'Swazi Lilangeni', flag: '🇸🇿'},
+  TJS: {name: 'Tajikistani Somoni', flag: '🇹🇯'},
+  TMT: {name: 'Turkmenistani Manat', flag: '🇹🇲'},
+  TND: {name: 'Tunisian Dinar', flag: '🇹🇳'},
+  TOP: {name: 'Tongan Paʻanga', flag: '🇹🇴'},
+  TTD: {name: 'Trinidad and Tobago Dollar', flag: '🇹🇹'},
+  TVD: {name: 'Tuvaluan Dollar', flag: '🇹🇻'},
+  TZS: {name: 'Tanzanian Shilling', flag: '🇹🇿'},
+  UGX: {name: 'Ugandan Shilling', flag: '🇺🇬'},
+  UZS: {name: 'Uzbekistan Som', flag: '🇺🇿'},
+  VES: {name: 'Venezuelan Bolívar Soberano', flag: '🇻🇪'},
+  VUV: {name: 'Vanuatu Vatu', flag: '🇻🇺'},
+  WST: {name: 'Samoan Tala', flag: '🇼🇸'},
+  XAF: {name: 'CFA Franc BEAC', flag: ''},
+  XCD: {name: 'East Caribbean Dollar', flag: ''},
+  XCG: {name: 'Caribbean Guilder', flag: ''},
+  XDR: {name: 'Special Drawing Rights (IMF)', flag: ''},
+  XOF: {name: 'CFA Franc BCEAO', flag: ''},
+  XPF: {name: 'CFP Franc', flag: ''},
+  YER: {name: 'Yemeni Rial', flag: '🇾🇪'},
+  ZMW: {name: 'Zambian Kwacha', flag: '🇿🇲'},
+  ZWG: {name: 'Zimbabwean Gold', flag: '🇿🇼'},
+  ZWL: {name: 'Zimbabwean Dollar', flag: '🇿🇼'},
+};
+function _currencyMeta(code) {
+  return CURRENCIES_META[code] || {name: code, flag: ''};
+}
+let fxState = {
+  base: 'USD',
+  rates: { USD: 1.0 },
+  asOf: null,
+  source: 'open.er-api.com',
+  currency: (localStorage.getItem(FX_CURRENCY_LS_KEY) || 'USD'),
+};
+
+function _symbolFor(cur) { return CURRENCY_SYMBOLS[cur] || (cur + ' '); }
+function convertCost(usdAmount) {
+  if (typeof usdAmount !== 'number' || !isFinite(usdAmount)) return 0;
+  const r = (fxState.rates && fxState.rates[fxState.currency]);
+  return (typeof r === 'number') ? usdAmount * r : usdAmount;
+}
+function _fmtAmount(value, digits) {
+  const cur = fxState.currency;
+  // Currencies with no minor units / where decimals are noisy.
+  if (cur === 'JPY' || cur === 'KRW' || cur === 'HUF' || cur === 'IDR') {
+    digits = (digits >= 2) ? 0 : 0;
+  }
+  return value.toFixed(digits);
+}
+function fmtCostCurrency(usdAmount, digits) {
+  if (typeof digits !== 'number') digits = 2;
+  const value = convertCost(usdAmount);
+  const sym = _symbolFor(fxState.currency);
+  const formatted = _fmtAmount(value, digits);
+  return SYMBOL_SUFFIX.has(fxState.currency) ? (formatted + sym) : (sym + formatted);
+}
+function fmtCost(c)    { return fmtCostCurrency(c, 4); }
+function fmtCostBig(c) { return fmtCostCurrency(c, 2); }
+
+async function _loadFxRates() {
+  // Clean up old v1 cache key from before the open.er-api.com switch.
+  try { localStorage.removeItem('fx_rates'); } catch (e) {}
+  // Try localStorage cache first.
+  try {
+    const raw = localStorage.getItem(FX_LS_KEY);
+    if (raw) {
+      const cached = JSON.parse(raw);
+      if (cached && cached.cached_at && (Date.now() - cached.cached_at) < FX_CLIENT_TTL_MS
+          && cached.rates && typeof cached.rates === 'object') {
+        fxState.rates  = cached.rates;
+        fxState.asOf   = cached.as_of || null;
+        fxState.base   = cached.base || 'USD';
+        fxState.source = cached.source || 'open.er-api.com';
+        return;
+      }
+    }
+  } catch (e) { /* ignore */ }
+  try {
+    const resp = await fetch('/api/fx-rates');
+    const d = await resp.json();
+    if (d && d.rates) {
+      fxState.rates  = d.rates;
+      fxState.asOf   = d.as_of || null;
+      fxState.base   = d.base || 'USD';
+      fxState.source = d.source || 'open.er-api.com';
+      try {
+        localStorage.setItem(FX_LS_KEY, JSON.stringify({
+          rates: d.rates, as_of: d.as_of, base: d.base || 'USD',
+          source: d.source || 'open.er-api.com',
+          cached_at: Date.now(), fallback: !!d.fallback,
+        }));
+      } catch (e) { /* ignore quota */ }
+    }
+  } catch (e) { console.error('FX fetch failed', e); }
+}
+
+function _populateCurrencyOptions() {
+  const input = document.getElementById('currency-input');
+  if (!input) return;
+  if (!fxState.rates[fxState.currency]) {
+    fxState.currency = 'USD';
+  }
+  _updateCurrencyInputLabel();
+  if (fxState.asOf) {
+    const footer = document.getElementById('fx-footer');
+    const asof   = document.getElementById('fx-asof');
+    const srcEl  = document.getElementById('fx-source');
+    if (asof) asof.textContent = fxState.asOf;
+    if (srcEl && fxState.source) srcEl.textContent = fxState.source;
+    if (footer) footer.style.display = '';
+  }
+}
+
+function _updateCurrencyInputLabel() {
+  const input = document.getElementById('currency-input');
+  if (!input) return;
+  const meta = _currencyMeta(fxState.currency);
+  const flag = meta.flag ? (meta.flag + ' ') : '';
+  input.value = '';
+  input.placeholder = flag + fxState.currency + ' \u2014 ' + meta.name;
+}
+
+// ── Searchable currency combobox ─────────────────────────────────────────
+let _ccHighlight = -1;
+let _ccFiltered  = [];
+
+function _allCurrencyCodes() {
+  const codes = Object.keys(fxState.rates || {});
+  if (codes.indexOf('USD') === -1) codes.unshift('USD');
+  codes.sort((a, b) => (a === 'USD' ? -1 : b === 'USD' ? 1 : a.localeCompare(b)));
+  return codes;
+}
+
+function _filterCurrencies(query) {
+  const codes = _allCurrencyCodes();
+  const q = (query || '').trim().toLowerCase();
+  if (!q) return codes;
+  return codes.filter(code => {
+    if (code.toLowerCase().indexOf(q) !== -1) return true;
+    const meta = _currencyMeta(code);
+    return meta.name && meta.name.toLowerCase().indexOf(q) !== -1;
+  });
+}
+
+function _ccEscape(s) {
+  if (s == null) return '';
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  })[c]);
+}
+
+function _renderCurrencyDropdown(query) {
+  const dd = document.getElementById('currency-dropdown');
+  if (!dd) return;
+  _ccFiltered = _filterCurrencies(query);
+  if (_ccFiltered.length === 0) {
+    dd.innerHTML = '<div style="padding:8px 12px;color:var(--muted);font-size:12px;">No match</div>';
+    dd.style.display = '';
+    return;
+  }
+  const curIdx = _ccFiltered.indexOf(fxState.currency);
+  _ccHighlight = curIdx !== -1 ? curIdx : 0;
+  dd.innerHTML = _ccFiltered.map((code, i) => {
+    const meta = _currencyMeta(code);
+    const flag = meta.flag || '\u00a0\u00a0';
+    const active = (i === _ccHighlight) ? ' background:var(--border);' : '';
+    const tick = (code === fxState.currency) ? '\u2713' : '';
+    return '<div class="cc-row" data-code="' + code + '" data-idx="' + i +
+           '" style="padding:6px 12px;cursor:pointer;display:flex;align-items:center;gap:8px;white-space:nowrap;' + active + '">' +
+             '<span style="width:1.4em;display:inline-block;text-align:center;">' + flag + '</span>' +
+             '<span style="font-weight:600;min-width:3.2em;">' + code + '</span>' +
+             '<span style="color:var(--muted);font-size:11px;overflow:hidden;text-overflow:ellipsis;">' + _ccEscape(meta.name) + '</span>' +
+             '<span style="color:var(--accent,#4ade80);margin-left:auto;">' + tick + '</span>' +
+           '</div>';
+  }).join('');
+  dd.style.display = '';
+  Array.from(dd.querySelectorAll('.cc-row')).forEach(row => {
+    row.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      onCurrencyChange(row.getAttribute('data-code'));
+      _closeCurrencyDropdown();
+      const input = document.getElementById('currency-input');
+      if (input) input.blur();
+    });
+    row.addEventListener('mouseenter', () => {
+      _ccHighlight = parseInt(row.getAttribute('data-idx'), 10) || 0;
+      _highlightCurrencyRow();
+    });
+  });
+  _scrollHighlightedIntoView();
+}
+
+function _highlightCurrencyRow() {
+  const dd = document.getElementById('currency-dropdown');
+  if (!dd) return;
+  Array.from(dd.querySelectorAll('.cc-row')).forEach((row, i) => {
+    row.style.background = (i === _ccHighlight) ? 'var(--border)' : '';
+  });
+  _scrollHighlightedIntoView();
+}
+
+function _scrollHighlightedIntoView() {
+  const dd = document.getElementById('currency-dropdown');
+  if (!dd || _ccHighlight < 0) return;
+  const rows = dd.querySelectorAll('.cc-row');
+  const row = rows[_ccHighlight];
+  if (!row) return;
+  const rTop = row.offsetTop;
+  const rBot = rTop + row.offsetHeight;
+  if (rTop < dd.scrollTop) dd.scrollTop = rTop;
+  else if (rBot > dd.scrollTop + dd.clientHeight) dd.scrollTop = rBot - dd.clientHeight;
+}
+
+function _openCurrencyDropdown() {
+  const input = document.getElementById('currency-input');
+  _renderCurrencyDropdown(input ? input.value : '');
+}
+
+function _closeCurrencyDropdown() {
+  const dd = document.getElementById('currency-dropdown');
+  if (dd) dd.style.display = 'none';
+}
+
+function _initCurrencyCombobox() {
+  const input = document.getElementById('currency-input');
+  if (!input || input._ccBound) return;
+  input._ccBound = true;
+  input.addEventListener('focus', () => _openCurrencyDropdown());
+  input.addEventListener('input', () => _renderCurrencyDropdown(input.value));
+  input.addEventListener('blur', () => {
+    setTimeout(() => {
+      _closeCurrencyDropdown();
+      _updateCurrencyInputLabel();
+    }, 150);
+  });
+  input.addEventListener('keydown', (e) => {
+    const dd = document.getElementById('currency-dropdown');
+    const open = dd && dd.style.display !== 'none';
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (!open) { _openCurrencyDropdown(); return; }
+      if (_ccFiltered.length) {
+        _ccHighlight = (_ccHighlight + 1) % _ccFiltered.length;
+        _highlightCurrencyRow();
+      }
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (!open) { _openCurrencyDropdown(); return; }
+      if (_ccFiltered.length) {
+        _ccHighlight = (_ccHighlight - 1 + _ccFiltered.length) % _ccFiltered.length;
+        _highlightCurrencyRow();
+      }
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      if (open && _ccFiltered[_ccHighlight]) {
+        onCurrencyChange(_ccFiltered[_ccHighlight]);
+        _closeCurrencyDropdown();
+        input.blur();
+      }
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      _closeCurrencyDropdown();
+      input.blur();
+    }
+  });
+  document.addEventListener('mousedown', (e) => {
+    const wrap = document.getElementById('currency-combobox');
+    if (wrap && !wrap.contains(e.target)) _closeCurrencyDropdown();
+  });
+}
+
+function onCurrencyChange(code) {
+  fxState.currency = code || 'USD';
+  try { localStorage.setItem(FX_CURRENCY_LS_KEY, fxState.currency); } catch (e) {}
+  _updateCurrencyInputLabel();
+  if (typeof applyFilter === 'function' && typeof rawData !== 'undefined' && rawData) {
+    applyFilter();
+  }
+}
+
+// Kick off FX load early. When done, populate combobox and re-render if data is ready.
+_loadFxRates().then(() => {
+  _initCurrencyCombobox();
+  _populateCurrencyOptions();
+  if (typeof rawData !== 'undefined' && rawData && typeof applyFilter === 'function') {
+    applyFilter();
+  }
+});
+// Also init the combobox immediately so focus/typing works even before FX loads.
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', _initCurrencyCombobox);
+} else {
+  _initCurrencyCombobox();
+}
 
 // ── Chart colors ───────────────────────────────────────────────────────────
 function tokenColors() {
@@ -2835,6 +3396,24 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         elif self.path == "/api/themes":
             body = json.dumps(get_themes()).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif self.path == "/api/fx-rates":
+            data = _fetch_fx_rates()
+            if data is None:
+                payload = {
+                    "error": "FX fetch failed",
+                    "fallback": True,
+                    "base": "USD",
+                    "rates": {"USD": 1.0},
+                    "as_of": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                }
+            else:
+                payload = data
+            body = json.dumps(payload).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
