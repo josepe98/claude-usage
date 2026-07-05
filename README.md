@@ -24,6 +24,7 @@ Claude Code writes detailed usage logs locally — token counts, models, session
 >
 > **Dashboard features**
 > - **5 bundled themes** (Apple, Linear, Vercel, Notion, Stripe) with a gallery at `/themes` and a quick-switch dropdown in the header
+> - **Custom date-range picker** — select any date range in the filter bar, including preset shortcuts
 > - **Session detail view** — click any session row to see its full turn history, tool usage, and working directories
 > - **Period delta badges** — each stat card shows +N%/−N% vs the prior equivalent window
 > - **Pareto cost card** — shows what share of total spend your top 5 sessions account for
