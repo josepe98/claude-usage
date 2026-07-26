@@ -1,7 +1,7 @@
 FROM python:3.12-slim
 
 WORKDIR /app
-COPY cli.py dashboard.py scanner.py ./
+COPY cli.py dashboard.py scanner.py cowork.py pricing.py ./
 
 ENV HOST=0.0.0.0 \
     PORT=8080 \
