@@ -86,11 +86,12 @@ python3 cli.py dashboard
 ### Docker
 
 ```bash
+# Start the dashboard container
 docker compose up -d
 # Open http://localhost:8080
 ```
 
-Mounts `~/.claude` into the container, so the SQLite DB at `~/.claude/usage.db`
+The `compose.yaml` file mounts `~/.claude` into the container, so the SQLite DB at `~/.claude/usage.db`
 persists on the host and CLI commands (`python3 cli.py today`) keep working
 alongside the container.
 
@@ -159,9 +160,9 @@ Claude Code writes one JSONL file per session to `~/.claude/projects/`. Each lin
 
 ## Cost estimates
 
-Costs are calculated using **Anthropic API pricing as of June 2026** ([claude.com/pricing#api](https://claude.com/pricing#api)).
+Costs are calculated using **Anthropic API pricing as of July 2026** ([claude.com/pricing#api](https://claude.com/pricing#api)).
 
-**Only models whose name contains `opus`, `sonnet`, or `haiku` are included in cost calculations.** Local models, unknown models, and any other model names are excluded (shown as `n/a`). The table below shows representative models; `pricing.py` tracks additional variants (4-5, 4-7) with the same tier pricing.
+**Only models whose name contains `opus`, `sonnet`, or `haiku` are included in cost calculations.** Local models, unknown models, and any other model names are excluded (shown as `n/a`). The table below shows representative models; `pricing.py` tracks all variants (4-5, 4-6, 4-7) with the same tier pricing per family.
 
 | Model | Input | Output | Cache Write | Cache Read |
 |-------|-------|--------|------------|-----------|

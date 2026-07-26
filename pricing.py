@@ -2,7 +2,7 @@
 Anthropic API pricing — single source of truth for both the Python CLI cost
 calculator and the JavaScript dashboard.
 
-USD per million tokens. Updated April 2026.
+USD per million tokens. Updated July 2026.
 Source: https://docs.claude.com/en/docs/about-claude/pricing
 """
 
