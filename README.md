@@ -24,8 +24,11 @@ Claude Code writes detailed usage logs locally — token counts, models, session
 >
 > **Dashboard features**
 > - **5 bundled themes** (Apple, Linear, Vercel, Notion, Stripe) with a gallery at `/themes` and a quick-switch dropdown in the header
+> - **Custom date-range picker** — select any date range in the filter bar, including preset shortcuts
 > - **Session detail view** — click any session row to see its full turn history, tool usage, and working directories
+> - **Session topic column** — track and search by session topic (auto-populated from first message)
 > - **Period delta badges** — each stat card shows +N%/−N% vs the prior equivalent window
+> - **Daily Est. Cost line** — overlay cost trend on the token usage chart
 > - **Pareto cost card** — shows what share of total spend your top 5 sessions account for
 > - **Search** — filter the sessions table by project, branch, or model as you type
 > - **In-dashboard rescan** — refresh data without restarting the server
@@ -85,11 +88,12 @@ python3 cli.py dashboard
 ### Docker
 
 ```bash
+# Start the dashboard container
 docker compose up -d
 # Open http://localhost:8080
 ```
 
-Mounts `~/.claude` into the container, so the SQLite DB at `~/.claude/usage.db`
+The `compose.yaml` file mounts `~/.claude` into the container, so the SQLite DB at `~/.claude/usage.db`
 persists on the host and CLI commands (`python3 cli.py today`) keep working
 alongside the container.
 
@@ -158,9 +162,9 @@ Claude Code writes one JSONL file per session to `~/.claude/projects/`. Each lin
 
 ## Cost estimates
 
-Costs are calculated using **Anthropic API pricing as of April 2026** ([claude.com/pricing#api](https://claude.com/pricing#api)).
+Costs are calculated using **Anthropic API pricing as of August 2026** ([claude.com/pricing#api](https://claude.com/pricing#api)).
 
-**Only models whose name contains `opus`, `sonnet`, or `haiku` are included in cost calculations.** Local models, unknown models, and any other model names are excluded (shown as `n/a`).
+**Only models whose name contains `opus`, `sonnet`, or `haiku` are included in cost calculations.** Local models, unknown models, and any other model names are excluded (shown as `n/a`). The table below shows representative models; `pricing.py` tracks all variants (4-5, 4-6, 4-7) with the same tier pricing per family.
 
 | Model | Input | Output | Cache Write | Cache Read |
 |-------|-------|--------|------------|-----------|
