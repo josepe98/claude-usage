@@ -10,6 +10,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 
 import cowork
+import workspace
 
 PROJECTS_DIR = Path.home() / ".claude" / "projects"
 XCODE_PROJECTS_DIR = Path.home() / "Library" / "Developer" / "Xcode" / "CodingAssistant" / "ClaudeAgentConfig" / "projects"
@@ -48,6 +49,8 @@ def _migrate_schema(conn):
     for sql in (
         "ALTER TABLE turns ADD COLUMN cache_1h_tokens INTEGER DEFAULT 0",
         "ALTER TABLE sessions ADD COLUMN total_cache_1h INTEGER DEFAULT 0",
+        "ALTER TABLE turns ADD COLUMN machine_id TEXT",
+        "ALTER TABLE sessions ADD COLUMN machine_id TEXT",
     ):
         try:
             conn.execute(sql)
@@ -113,6 +116,9 @@ def init_db(conn):
         CREATE UNIQUE INDEX IF NOT EXISTS idx_turns_message_id
         ON turns(message_id) WHERE message_id IS NOT NULL AND message_id != ''
     """)
+    # Ensure machine_id columns exist (idempotent) for both fresh DBs and
+    # databases created before workspace/team mode shipped.
+    _migrate_schema(conn)
     conn.commit()
 
 
@@ -332,14 +338,15 @@ def upsert_sessions(conn, sessions):
                     (session_id, project_name, first_timestamp, last_timestamp,
                      git_branch, total_input_tokens, total_output_tokens,
                      total_cache_read, total_cache_creation, total_cache_1h, model, turn_count,
-                     session_name)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     session_name, machine_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 s["session_id"], s["project_name"], s["first_timestamp"],
                 s["last_timestamp"], s["git_branch"],
                 s["total_input_tokens"], s["total_output_tokens"],
                 s["total_cache_read"], s["total_cache_creation"], s.get("total_cache_1h", 0),
-                s["model"], s["turn_count"], s.get("session_name")
+                s["model"], s["turn_count"], s.get("session_name"),
+                s.get("machine_id") or workspace.load_config()["machine_id"]
             ))
         else:
             # Update: add new tokens on top of existing (since we only insert new turns)
@@ -385,22 +392,31 @@ def insert_turns(conn, turns):
     # usage tallies), overwrite the earlier partial row. INSERT OR IGNORE
     # would lock in stale partial counts when the streaming boundary fell
     # between two incremental scans.
+    mid = workspace.load_config()["machine_id"]
     conn.executemany("""
         INSERT OR REPLACE INTO turns
             (session_id, timestamp, model, input_tokens, output_tokens,
-             cache_read_tokens, cache_creation_tokens, cache_1h_tokens, tool_name, cwd, message_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             cache_read_tokens, cache_creation_tokens, cache_1h_tokens, tool_name, cwd, message_id, machine_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, [
         (t["session_id"], t["timestamp"], t["model"],
          t["input_tokens"], t["output_tokens"],
          t["cache_read_tokens"], t["cache_creation_tokens"],
          t.get("cache_1h_tokens", 0),
-         t["tool_name"], t["cwd"], t.get("message_id", ""))
+         t["tool_name"], t["cwd"], t.get("message_id", ""),
+         t.get("machine_id") or mid)
         for t in turns
     ])
 
 
-def scan(projects_dir=None, projects_dirs=None, db_path=DB_PATH, verbose=True):
+def scan(projects_dir=None, projects_dirs=None, db_path=None, verbose=True):
+    # Resolve DB path from workspace config when caller didn't override.
+    # Postgres backend stays out of this PR's scanner write path (the SQLite
+    # default still wins for now); the column migration runs either way so
+    # a dashboard pointed at PG sees the machine_id column on first query.
+    if db_path is None:
+        cfg = workspace.load_config()
+        db_path = Path(cfg["db_path"]) if cfg.get("db_path") else DB_PATH
     conn = get_db(db_path)
     init_db(conn)
 
