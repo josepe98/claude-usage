@@ -132,6 +132,9 @@ HOST=0.0.0.0 PORT=9000 python cli.py dashboard
 # Scan a custom projects directory
 python cli.py scan --projects-dir /path/to/transcripts
 
+# Generate markdown timeline for a single session
+python cli.py timeline <session_id_or_prefix>
+
 # List available themes
 python cli.py theme list
 
