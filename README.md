@@ -204,4 +204,6 @@ the API reports rather than aggregating per-event streaming chunks.
 |------|---------|
 | `scanner.py` | Parses JSONL transcripts, writes to `~/.claude/usage.db` |
 | `dashboard.py` | HTTP server + single-page HTML/JS dashboard |
-| `cli.py` | `scan`, `today`, `stats`, `dashboard`, `theme` commands |
+| `cli.py` | `scan`, `today`, `stats`, `dashboard`, `theme`, `timeline` commands |
+| `pricing.py` | Single source of truth for model pricing (Python + JS) and cost calculation |
+| `cowork.py` | Scans Claude Desktop Cowork audit logs, merges into SQLite DB |
