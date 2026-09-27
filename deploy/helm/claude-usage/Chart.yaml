@@ -1,0 +1,17 @@
+apiVersion: v2
+name: claude-usage
+description: A Helm chart for deploying the claude-usage dashboard (Anthropic Claude Code usage analytics) on Kubernetes.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - claude
+  - anthropic
+  - usage
+  - analytics
+  - dashboard
+home: https://github.com/josepe98/claude-usage
+sources:
+  - https://github.com/josepe98/claude-usage
+maintainers:
+  - name: claude-usage contributors
