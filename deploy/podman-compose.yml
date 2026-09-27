@@ -1,0 +1,29 @@
+# podman-compose.yml -- run the dashboard with Podman (rootless or rootful).
+#
+# Differences vs docker-compose.yml:
+#   * Uses a prebuilt local image (localhost/claude-usage:latest) rather
+#     than build: -- podman-compose's build support is patchier than
+#     Docker Compose's, so we prefer 'podman build -f deploy/Containerfile'
+#     up front and then run from the image.
+#   * Adds userns_mode: keep-id. Under rootless podman the container UID
+#     gets remapped via /etc/subuid, which would mangle bind-mount
+#     ownership. keep-id maps the container's app user back to the host
+#     user so reads/writes against ~/.claude stay sane.
+#   * Drops the explicit user: override because keep-id handles it.
+
+services:
+  claude-usage:
+    image: localhost/claude-usage:latest
+    container_name: claude-usage
+    userns_mode: keep-id
+    ports:
+      - "8090:8090"
+    volumes:
+      - "${HOME:?HOME must be set}/.claude:/data/.claude"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:8090/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
