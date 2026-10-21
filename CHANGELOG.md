@@ -4,6 +4,13 @@
 
 - Add session name support: the dashboard now shows the human-readable name set via Claude Code's `/rename` (from `customTitle` / `agentName` JSONL records), alongside the session ID, and exports it to CSV (#56)
 
+## v1.7.0 — 2026-10-21
+
+- Add plan-allowance tracking for Claude.ai Pro / Max subscribers: `ratelimits.py` runs as Claude Code's status line, shows `5h N% · wk N%`, and records the server-reported 5-hour and weekly utilization to `~/.claude/claude-usage/rate_limits.jsonl`
+- Add Plan Allowance card to the dashboard: per-window gauges, reset countdowns, a warning when the current pace would exhaust a window before it resets, and a 7-day history chart
+- `cli.py today` now opens with 5-hour / weekly usage and reset times
+- New `rate_limit_snapshots` table, filled by `scan`, `cli.py today` and `/api/data`
+
 ## 2026-04-09
 
 - Fix token counts inflated ~2x by deduplicating streaming events that share the same message ID
