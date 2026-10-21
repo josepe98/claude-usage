@@ -91,6 +91,43 @@ def print_allowance(conn):
     print(f"  {'':<18}(last reading {_fmt_duration(a['age_seconds'])} ago)")
 
 
+def cmd_record_usage():
+    sys.exit(ratelimits.record_desktop_main())
+
+
+def cmd_weekly():
+    conn = require_db()
+    try:
+        ratelimits.ingest_snapshots(conn)
+    except Exception as e:
+        print(f"  Warning: rate-limit snapshots not ingested: {e}")
+    a = ratelimits.allowance_summary(conn)
+    conn.close()
+    weeks = a["weekly_history"] if a else []
+    print()
+    hr()
+    print("  Weekly Plan Usage")
+    hr()
+    if not weeks:
+        print("  No weekly readings yet (see README: Plan allowance).")
+        print()
+        return
+    models = sorted({m for w in weeks for m in w["models"]})
+    print(f"  {'Week ending':<18}{'All models':>11}" + "".join(f"{m:>10}" for m in models) + "  Note")
+    for w in weeks:
+        end = datetime.fromtimestamp(w["resets_at"]).strftime("%a %d %b %H:%M")
+        cols = "".join(f"{(str(round(w['models'][m])) + '%') if m in w['models'] else '-':>10}" for m in models)
+        if not w["complete"]:
+            note = "in progress"
+        elif w["gap_hours"] > 6:
+            note = f"last reading {w['gap_hours']:.0f}h before reset; may be higher"
+        else:
+            note = ""
+        print(f"  {end:<18}{w['pct']:>10.0f}%{cols}  {note}")
+    hr()
+    print()
+
+
 def cmd_today():
     conn = require_db()
     conn.row_factory = sqlite3.Row
@@ -727,6 +764,8 @@ Claude Code Usage Dashboard
 Usage:
   python3 cli.py scan [--projects-dir PATH]       Scan JSONL files and update database
   python3 cli.py today                            Show today's usage summary
+  python3 cli.py weekly                           Weekly plan-allowance history
+  python3 cli.py record-usage < plan.json         Record desktop-app plan usage (JSON on stdin)
   python3 cli.py week                             Show last 7 days (per-day + by-model)
   python3 cli.py stats                            Show all-time statistics
   python3 cli.py dashboard [--projects-dir PATH] [--host HOST] [--port PORT]
@@ -744,6 +783,8 @@ COMMANDS = {
     "dashboard": cmd_dashboard,
     "theme": cmd_theme,
     "timeline": cmd_timeline,
+    "weekly": cmd_weekly,
+    "record-usage": cmd_record_usage,
 }
 
 def parse_named_arg(args, flag):

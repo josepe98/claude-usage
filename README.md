@@ -219,7 +219,32 @@ usage of each window, when it resets, and — at the window's average pace so
 far — when it would run out if that's before the reset. A 7-day history chart
 plots both windows.
 
-Caveats: readings are only taken while a Claude Code session is open and
+### Desktop app
+
+The Claude desktop app doesn't run status lines, so it needs a different
+feed. The app can report the same plan figures (plus per-model weekly limits
+and extra-usage spend) to Claude itself, so a desktop **scheduled task** can
+ask for them and pipe the JSON into:
+
+```bash
+python3 cli.py record-usage < plan.json
+```
+
+It prints `RECORDED …` and exits 0, or exits 1 with the reason (also logged to
+`statusline-errors.log`). A schedule such as `45 2,6,10,14,18,22 * * *` keeps
+the last reading of each week within a few hours of the reset. Scheduled tasks
+only run while the desktop app is open; the dashboard's "last reading" turns
+red when nothing has arrived for 8 hours.
+
+### Weekly history
+
+`python3 cli.py weekly` and the dashboard's **Weekly history** table list
+each weekly window with its total (the highest reading before reset), any
+per-model weekly limits, and a note when the last reading was taken more than
+6 hours before the reset — the final figure may then be a little higher.
+History starts from your first reading; earlier weeks can't be recovered.
+
+Caveats: status-line readings are only taken while a Claude Code session is open and
 redrawing its status line. Usage from claude.ai or the desktop app counts
 against the same limits and appears in the next reading, but not in between.
 API-key sessions have no plan limits, so nothing is recorded for them. If the
@@ -232,7 +257,7 @@ the traceback goes to `~/.claude/claude-usage/statusline-errors.log`.
 |------|---------|
 | `scanner.py` | Parses JSONL transcripts, writes to `~/.claude/usage.db` |
 | `dashboard.py` | HTTP server + single-page HTML/JS dashboard |
-| `cli.py` | `scan`, `today`, `stats`, `dashboard`, `theme`, `timeline` commands |
+| `cli.py` | `scan`, `today`, `week`, `weekly`, `stats`, `dashboard`, `theme`, `timeline`, `record-usage` commands |
 | `pricing.py` | Single source of truth for model pricing (Python + JS) and cost calculation |
 | `cowork.py` | Scans Claude Desktop Cowork audit logs, merges into SQLite DB |
 | `ratelimits.py` | Status-line recorder for 5-hour / weekly plan allowance, plus the summary the CLI and dashboard show |
