@@ -18,6 +18,7 @@ from datetime import datetime, date, timedelta
 DB_PATH = Path.home() / ".claude" / "usage.db"
 
 from pricing import PRICING, get_pricing, calc_cost
+import ratelimits
 
 
 def fmt(n):
@@ -45,6 +46,49 @@ def require_db():
 def cmd_scan(projects_dir=None):
     from scanner import scan
     scan(projects_dir=Path(projects_dir) if projects_dir else None)
+
+
+def _fmt_duration(sec):
+    sec = max(0, int(sec))
+    d, h, m = sec // 86400, sec % 86400 // 3600, sec % 3600 // 60
+    if d:
+        return f"{d}d {h}h"
+    if h:
+        return f"{h}h {m}m"
+    return f"{m}m"
+
+
+def _fmt_when(epoch):
+    t = datetime.fromtimestamp(epoch)
+    return t.strftime("%H:%M") if t.date() == date.today() else t.strftime("%a %H:%M")
+
+
+def print_allowance(conn):
+    """Plan-allowance lines from the status-line snapshots, if any."""
+    try:
+        ratelimits.ingest_snapshots(conn)
+    except Exception as e:
+        print(f"  Warning: rate-limit snapshots not ingested: {e}")
+    a = ratelimits.allowance_summary(conn)
+    if not a or not a["windows"]:
+        print("  Plan allowance:   no readings (set ratelimits.py as your status line; see README)")
+        return
+    for w in a["windows"]:
+        name = "5-hour" if w["key"] == "five_hour" else "Weekly"
+        if w["reset_since_reading"]:
+            print(f"  {name + ' limit:':<18}reset at {_fmt_when(w['resets_at'])}, no reading since")
+            continue
+        line = f"  {name + ' limit:':<18}{w['pct']:.0f}% used, resets {_fmt_when(w['resets_at'])}"
+        if w["projected_full_at"]:
+            line += f"  (!) full at {_fmt_when(w['projected_full_at'])} at this pace"
+        print(line)
+    if a["spend"]:
+        sp = a["spend"]
+        if sp["spend_used_usd"] is not None and sp["spend_limit_usd"]:
+            print(f"  {'Spend limit:':<18}${sp['spend_used_usd']:.2f} of ${sp['spend_limit_usd']:.2f}")
+        else:
+            print(f"  {'Spend limit:':<18}{sp['spend_pct']:.0f}% used")
+    print(f"  {'':<18}(last reading {_fmt_duration(a['age_seconds'])} ago)")
 
 
 def cmd_today():
@@ -77,10 +121,13 @@ def cmd_today():
     hr()
     print(f"  Today's Usage  ({today})")
     hr()
+    print_allowance(conn)
+    hr()
 
     if not rows:
         print("  No usage recorded today.")
         print()
+        conn.close()
         return
 
     total_inp = total_out = total_cr = total_cc = total_turns = 0

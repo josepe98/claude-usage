@@ -6,13 +6,14 @@ Guidance for any coding agent (Codex, Claude Code, etc.) working on this reposit
 
 ## Project shape
 
-Five Python files, stdlib only, no `pip install` step. Python 3.8+.
+Six Python files, stdlib only, no `pip install` step. Python 3.8+.
 
 - [scanner.py](scanner.py) — parses Claude Code JSONL transcripts into a SQLite DB at `~/.claude/usage.db`.
 - [cli.py](cli.py) — terminal commands (`scan` / `today` / `week` / `stats` / `dashboard` / `theme`).
 - [dashboard.py](dashboard.py) — single-file `http.server` serving an embedded HTML/JS SPA on `localhost:8080`.
 - [pricing.py](pricing.py) — single source of truth for model pricing (Python + JS both import/inline from here). Also contains `PRICING_HISTORY` for time-keyed historic rates and `get_pricing_at()` / `calc_cost_at()` for accurate costing of old sessions.
 - [cowork.py](cowork.py) — scans Claude Desktop Cowork audit logs and merges them into the same SQLite DB.
+- [ratelimits.py](ratelimits.py) — run as Claude Code's status line, it records server-reported plan allowance (5-hour / weekly utilization) to `~/.claude/claude-usage/rate_limits.jsonl`; `scan`, `cli.py today` and `/api/data` ingest those into the `rate_limit_snapshots` table. `tests/__init__.py` redirects its file paths to a temp dir — keep that so tests never read the user's real snapshots.
 
 Use `python` on Windows, `python3` on macOS/Linux. Both work the same.
 

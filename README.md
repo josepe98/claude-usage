@@ -198,6 +198,36 @@ Token totals come from the authoritative `result.modelUsage` blocks (the same
 numbers Anthropic uses for billing), so cost estimates line up with what
 the API reports rather than aggregating per-event streaming chunks.
 
+## Plan allowance (Pro / Max)
+
+Subscription plans are limited by a rolling **5-hour session** window and a
+**weekly** cap, not by dollars. The JSONL transcripts don't record either, but
+Claude Code passes the server-reported utilization to its status-line command.
+`ratelimits.py` is a status line that shows `5h 42% · wk 18%` and appends a
+snapshot to `~/.claude/claude-usage/rate_limits.jsonl` whenever the numbers
+change (plus a heartbeat every 10 minutes).
+
+Add this to `~/.claude/settings.json` (use the absolute path to your checkout):
+
+```json
+"statusLine": {
+  "type": "command",
+  "command": "python3 /path/to/claude-usage/ratelimits.py"
+}
+```
+
+The dashboard's **Plan Allowance** card and `cli.py today` then show current
+usage of each window, when it resets, and — at the window's average pace so
+far — when it would run out if that's before the reset. A 7-day history chart
+plots both windows.
+
+Caveats: readings are only taken while a Claude Code session is open and
+redrawing its status line. Usage from claude.ai or the desktop app counts
+against the same limits and appears in the next reading, but not in between.
+API-key sessions have no plan limits, so nothing is recorded for them. If the
+recorder itself fails, the status line shows `⚠ usage recorder: <error>` and
+the traceback goes to `~/.claude/claude-usage/statusline-errors.log`.
+
 ## Files
 
 | File | Purpose |
@@ -207,3 +237,4 @@ the API reports rather than aggregating per-event streaming chunks.
 | `cli.py` | `scan`, `today`, `stats`, `dashboard`, `theme`, `timeline` commands |
 | `pricing.py` | Single source of truth for model pricing (Python + JS) and cost calculation |
 | `cowork.py` | Scans Claude Desktop Cowork audit logs, merges into SQLite DB |
+| `ratelimits.py` | Status-line recorder for 5-hour / weekly plan allowance, plus the summary the CLI and dashboard show |

@@ -11,6 +11,7 @@ from urllib.parse import parse_qs, urlparse
 from pathlib import Path
 
 from pricing import PRICING
+import ratelimits
 from datetime import datetime, timedelta, date
 
 def _git_short_hash():
@@ -556,6 +557,12 @@ def get_dashboard_data(db_path=None):
     )
     for s in sessions_all:
         s["sparkline"] = _sparkline_data.get(s["session_id"], [])
+    # Pick up status-line readings written since the last scan.
+    try:
+        ratelimits.ingest_snapshots(conn)
+    except Exception as e:
+        print(f"Warning: rate-limit snapshots not ingested: {e}")
+    allowance = ratelimits.allowance_summary(conn)
     conn.close()
 
     return {
@@ -564,6 +571,7 @@ def get_dashboard_data(db_path=None):
         "hourly_by_model": hourly_by_model,
         "sessions_all":    sessions_all,
         "plan_recommendation": plan_recommendation,
+        "allowance":       allowance,
         "dow_hour":        dow_hour,
         "streak":          streak,
         "generated_at":       datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -1049,6 +1057,19 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .charts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px; }
   .chart-card { background: var(--card); border-radius: var(--card-radius); border: var(--card-border); padding: 20px; box-shadow: var(--shadow); }
   .chart-card.wide { grid-column: 1 / -1; }
+  .allowance-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
+  .allowance-win .row { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px; }
+  .allowance-win .name { font-size: 12px; color: var(--muted); font-weight: 500; }
+  .allowance-win .pct { font-size: 22px; font-weight: 600; color: var(--text); }
+  .allowance-bar { height: 8px; border-radius: 4px; background: var(--border); overflow: hidden; }
+  .allowance-bar > div { height: 100%; border-radius: 4px; background: var(--accent); transition: width 0.3s ease; }
+  .allowance-bar > div.warn { background: #f59e0b; }
+  .allowance-bar > div.crit { background: #ef4444; }
+  .allowance-win .sub { color: var(--muted); font-size: 11px; margin-top: 6px; line-height: 1.5; }
+  .allowance-win .sub .crit { color: #ef4444; font-weight: 600; }
+  .allowance-asof { color: var(--muted); font-size: 11px; }
+  .allowance-empty { color: var(--muted); font-size: 12px; line-height: 1.6; }
+  .allowance-empty code { background: var(--border); padding: 1px 5px; border-radius: 4px; font-size: 11px; }
   .chart-card h2 { font-size: 13px; font-weight: 600; color: var(--text); letter-spacing: -0.12px; margin-bottom: 16px; }
   .chart-wrap { position: relative; height: 240px; }
   .chart-wrap.tall { height: 300px; }
@@ -1177,6 +1198,14 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 </div>
 
 <div class="container">
+  <div class="chart-card" id="allowance-card" style="margin-bottom:16px">
+    <div class="chart-header">
+      <h2>Plan Allowance</h2>
+      <span class="allowance-asof" id="allowance-asof"></span>
+    </div>
+    <div id="allowance-body"></div>
+    <div class="chart-wrap" id="allowance-history-wrap" style="display:none; height:160px; margin-top:12px"><canvas id="chart-allowance"></canvas></div>
+  </div>
   <div class="stats-row" id="stats-row"></div>
     <div id="pareto-card" style="display:none; margin: -8px 0 16px 0; padding: 10px 14px; background: rgba(217,119,87,0.08); border-radius: 8px; font-size: 12px; color: var(--text);"></div>
     <div id="plan-card" style="display:none; margin:0 0 16px 0; padding:10px 14px; background:rgba(74,222,128,0.08); border-radius:8px; font-size:12px; color:var(--text);"></div>
@@ -1857,6 +1886,7 @@ function applyFilter() {
   renderProjectChart(byProject);
   renderPareto(lastFilteredSessions || filteredSessions);
   renderPlanCard();
+  renderAllowance();
   renderDowHourHeatmap();
   lastFilteredSessions = sortSessions(filteredSessions);
   lastByProject = sortProjects(byProject);
@@ -2200,6 +2230,91 @@ function renderPlanCard() {  // eslint-disable-line no-unused-vars
   const p = r.plans[r.recommended];
   el.style.display = "";
   el.innerHTML = `<strong>Plan recommendation:</strong> at $${r.month_to_date.toFixed(2)} API-equivalent this month, <strong>${r.recommended}</strong> ($${p.price}/mo, includes ${p.included}) would be the cheapest subscription. <span style="color:var(--muted)">Compare: ${Object.entries(r.plans).map(([n, pp]) => n + " $" + pp.price).join(" • ")}</span>`;
+}
+
+function fmtDuration(sec) {
+  sec = Math.max(0, Math.round(sec));
+  const d = Math.floor(sec / 86400), h = Math.floor(sec % 86400 / 3600), m = Math.floor(sec % 3600 / 60);
+  if (d) return d + 'd ' + h + 'h';
+  if (h) return h + 'h ' + m + 'm';
+  return m + 'm';
+}
+
+function fmtWhen(epochSec) {
+  const t = new Date(epochSec * 1000), now = new Date();
+  const time = t.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+  if (t.toDateString() === now.toDateString()) return time;
+  return t.toLocaleDateString([], {weekday: 'short'}) + ' ' + time;
+}
+
+function renderAllowance() {
+  const a = rawData && rawData.allowance;
+  const body = document.getElementById('allowance-body');
+  const asof = document.getElementById('allowance-asof');
+  const histWrap = document.getElementById('allowance-history-wrap');
+  if (!body) return;
+  if (!a || !a.windows.length) {
+    asof.textContent = '';
+    histWrap.style.display = 'none';
+    body.innerHTML = `<div class="allowance-empty">No allowance readings yet. Claude Code only reports your plan's 5-hour and weekly usage to its status line, so set <code>ratelimits.py</code> as your status line to record them:<br><code>"statusLine": {"type": "command", "command": "python3 /path/to/claude-usage/ratelimits.py"}</code> in <code>~/.claude/settings.json</code>. Readings appear here after the next scan.</div>`;
+    return;
+  }
+  const nowSec = Date.now() / 1000;
+  asof.textContent = 'last reading ' + fmtDuration(nowSec - a.latest_ts) + ' ago'
+    + (a.subscription_type ? ' \u00b7 ' + a.subscription_type : '');
+  const cards = a.windows.map(w => {
+    let pct = w.pct, sub;
+    if (w.reset_since_reading) {
+      pct = 0;
+      sub = `Reset at ${esc(fmtWhen(w.resets_at))} \u2014 no reading since (last was ${w.pct.toFixed(0)}%)`;
+    } else {
+      sub = `Resets in ${esc(fmtDuration(w.resets_at - nowSec))} (${esc(fmtWhen(w.resets_at))})`;
+      if (w.projected_full_at) {
+        sub += `<br><span class="crit">At this window's pace, full at ${esc(fmtWhen(w.projected_full_at))}</span>`;
+      } else if (w.rate_per_hour) {
+        sub += `<br>Pace ${w.rate_per_hour.toFixed(1)}%/h \u2014 on track to last until reset`;
+      }
+    }
+    const cls = pct >= 90 ? 'crit' : pct >= 70 ? 'warn' : '';
+    return `<div class="allowance-win">
+      <div class="row"><span class="name">${esc(w.label)}</span><span class="pct">${w.reset_since_reading ? '\u2014' : pct.toFixed(0) + '%'}</span></div>
+      <div class="allowance-bar"><div class="${cls}" style="width:${Math.min(100, pct)}%"></div></div>
+      <div class="sub">${sub}</div>
+    </div>`;
+  });
+  if (a.spend) {
+    const s = a.spend;
+    const val = s.spend_used_usd != null && s.spend_limit_usd ? `$${s.spend_used_usd.toFixed(0)} / $${s.spend_limit_usd.toFixed(0)}` : s.spend_pct.toFixed(0) + '%';
+    const cls = s.spend_pct >= 90 ? 'crit' : s.spend_pct >= 70 ? 'warn' : '';
+    cards.push(`<div class="allowance-win">
+      <div class="row"><span class="name">Spend limit${s.spend_period ? ' (' + esc(s.spend_period) + ')' : ''}</span><span class="pct">${val}</span></div>
+      <div class="allowance-bar"><div class="${cls}" style="width:${Math.min(100, s.spend_pct)}%"></div></div>
+    </div>`);
+  }
+  body.innerHTML = '<div class="allowance-grid">' + cards.join('') + '</div>';
+
+  const hist = a.history || [];
+  if (charts.allowance) charts.allowance.destroy();
+  if (hist.length < 2) { histWrap.style.display = 'none'; return; }
+  histWrap.style.display = '';
+  const c = chartColors();
+  const series = (i) => hist.filter(h => h[i] != null).map(h => ({x: h[0] * 1000, y: h[i]}));
+  charts.allowance = new Chart(document.getElementById('chart-allowance').getContext('2d'), {
+    type: 'line',
+    data: {datasets: [
+      {label: '5-hour %', data: series(1), borderColor: c.c1, backgroundColor: c.c1, stepped: true, pointRadius: 0, borderWidth: 1.5},
+      {label: 'Weekly %', data: series(2), borderColor: c.c4, backgroundColor: c.c4, stepped: true, pointRadius: 0, borderWidth: 1.5},
+    ]},
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      plugins: {legend: {labels: {color: c.label, boxWidth: 10, font: {size: 11}}},
+                tooltip: {callbacks: {title: items => new Date(items[0].parsed.x).toLocaleString()}}},
+      scales: {
+        x: {type: 'linear', ticks: {color: c.label, maxTicksLimit: 8, callback: v => new Date(v).toLocaleDateString([], {weekday: 'short', day: 'numeric'})}, grid: {color: c.grid}},
+        y: {min: 0, max: 100, ticks: {color: c.label, callback: v => v + '%'}, grid: {color: c.grid}},
+      },
+    },
+  });
 }
 
 function renderDowHourHeatmap() {  // eslint-disable-line no-unused-vars

@@ -10,6 +10,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 
 import cowork
+import ratelimits
 
 PROJECTS_DIR = Path.home() / ".claude" / "projects"
 XCODE_PROJECTS_DIR = Path.home() / "Library" / "Developer" / "Xcode" / "CodingAssistant" / "ClaudeAgentConfig" / "projects"
@@ -98,6 +99,7 @@ def init_db(conn):
         CREATE INDEX IF NOT EXISTS idx_turns_timestamp ON turns(timestamp);
         CREATE INDEX IF NOT EXISTS idx_sessions_first ON sessions(first_timestamp);
     """)
+    ratelimits.init_table(conn)
     # Add message_id column if upgrading from older schema
     try:
         conn.execute("SELECT message_id FROM turns LIMIT 1")
@@ -635,6 +637,15 @@ def scan(projects_dir=None, projects_dirs=None, db_path=DB_PATH, verbose=True):
         """)
         conn.commit()
 
+    # Plan-allowance snapshots written by the ratelimits.py status line.
+    # Default scans only, same rule as Cowork above.
+    snapshots_added = 0
+    if not projects_dir and not projects_dirs:
+        try:
+            snapshots_added = ratelimits.ingest_snapshots(conn)
+        except Exception as e:
+            print(f"  Warning: rate-limit snapshots not ingested: {e}")
+
     if verbose:
         print(f"\nScan complete:")
         print(f"  New files:     {new_files}")
@@ -642,6 +653,8 @@ def scan(projects_dir=None, projects_dirs=None, db_path=DB_PATH, verbose=True):
         print(f"  Skipped files: {skipped_files}")
         print(f"  Turns added:   {total_turns}")
         print(f"  Sessions seen: {len(total_sessions)}")
+        if snapshots_added:
+            print(f"  Allowance snapshots: {snapshots_added}")
 
     conn.close()
     return {"new": new_files, "updated": updated_files, "skipped": skipped_files,
