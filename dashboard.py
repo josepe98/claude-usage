@@ -1069,6 +1069,18 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .allowance-win .sub .crit { color: #ef4444; font-weight: 600; }
   .allowance-asof { color: var(--muted); font-size: 11px; }
   .allowance-empty { color: var(--muted); font-size: 12px; line-height: 1.6; }
+  .allowance-asof.stale { color: #ef4444; font-weight: 600; }
+  .weekly-hist { margin-top: 16px; }
+  .weekly-hist h3 { font-size: 12px; font-weight: 600; color: var(--text); margin-bottom: 8px; }
+  .weekly-hist table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .weekly-hist th { text-align: left; color: var(--muted); font-weight: 500; padding: 4px 8px 4px 0; border-bottom: 1px solid var(--border); }
+  .weekly-hist td { padding: 6px 8px 6px 0; border-bottom: 1px solid var(--border); color: var(--text); white-space: nowrap; }
+  .weekly-hist td .note { color: var(--muted); font-size: 11px; white-space: normal; max-width: 240px; margin-top: 2px; }
+  .weekly-hist td { vertical-align: top; }
+  .weekly-hist .mini { display: inline-block; width: 60px; height: 6px; border-radius: 3px; background: var(--border); vertical-align: middle; margin-right: 6px; overflow: hidden; }
+  .weekly-hist .mini > div { height: 100%; background: var(--accent); }
+  .weekly-hist .mini > div.warn { background: #f59e0b; }
+  .weekly-hist .mini > div.crit { background: #ef4444; }
   .allowance-empty code { background: var(--border); padding: 1px 5px; border-radius: 4px; font-size: 11px; }
   .chart-card h2 { font-size: 13px; font-weight: 600; color: var(--text); letter-spacing: -0.12px; margin-bottom: 16px; }
   .chart-wrap { position: relative; height: 240px; }
@@ -1205,6 +1217,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     </div>
     <div id="allowance-body"></div>
     <div class="chart-wrap" id="allowance-history-wrap" style="display:none; height:160px; margin-top:12px"><canvas id="chart-allowance"></canvas></div>
+    <div id="allowance-weekly"></div>
   </div>
   <div class="stats-row" id="stats-row"></div>
     <div id="pareto-card" style="display:none; margin: -8px 0 16px 0; padding: 10px 14px; background: rgba(217,119,87,0.08); border-radius: 8px; font-size: 12px; color: var(--text);"></div>
@@ -2247,6 +2260,27 @@ function fmtWhen(epochSec) {
   return t.toLocaleDateString([], {weekday: 'short'}) + ' ' + time;
 }
 
+function renderWeeklyHistory(weeks) {
+  const el = document.getElementById('allowance-weekly');
+  if (!weeks.length) { el.innerHTML = ''; return; }
+  const models = [...new Set(weeks.flatMap(w => Object.keys(w.models)))].sort();
+  const cell = (pct) => {
+    if (pct == null) return '<td>\u2014</td>';
+    const cls = pct >= 90 ? 'crit' : pct >= 70 ? 'warn' : '';
+    return `<td><span class="mini"><div class="${cls}" style="width:${Math.min(100, pct)}%"></div></span>${pct.toFixed(0)}%</td>`;
+  };
+  const fmtDay = (sec) => new Date(sec * 1000).toLocaleDateString([], {month: 'short', day: 'numeric'});
+  const rows = weeks.map(w => {
+    let note = '';
+    if (!w.complete) note = 'in progress';
+    else if (w.gap_hours > 6) note = `last reading ${w.gap_hours.toFixed(0)}h before reset; may be higher`;
+    return `<tr><td>${esc(fmtDay(w.starts_at))} \u2013 ${esc(fmtDay(w.resets_at))}${note ? `<div class="note">${esc(note)}</div>` : ''}</td>${cell(w.pct)}${models.map(m => cell(w.models[m])).join('')}<td>${w.readings}</td></tr>`;
+  });
+  el.innerHTML = `<div class="weekly-hist"><h3>Weekly history</h3><div class="table-scroll" style="overflow-x:auto"><table>
+    <thead><tr><th>Week</th><th>All models</th>${models.map(m => `<th>${esc(m)}</th>`).join('')}<th>Readings</th></tr></thead>
+    <tbody>${rows.join('')}</tbody></table></div></div>`;
+}
+
 function renderAllowance() {
   const a = rawData && rawData.allowance;
   const body = document.getElementById('allowance-body');
@@ -2256,10 +2290,13 @@ function renderAllowance() {
   if (!a || !a.windows.length) {
     asof.textContent = '';
     histWrap.style.display = 'none';
-    body.innerHTML = `<div class="allowance-empty">No allowance readings yet. Claude Code only reports your plan's 5-hour and weekly usage to its status line, so set <code>ratelimits.py</code> as your status line to record them:<br><code>"statusLine": {"type": "command", "command": "python3 /path/to/claude-usage/ratelimits.py"}</code> in <code>~/.claude/settings.json</code>. Readings appear here after the next scan.</div>`;
+    renderWeeklyHistory([]);
+    body.innerHTML = `<div class="allowance-empty">No allowance readings yet. For terminal sessions, set <code>ratelimits.py</code> as your Claude Code status line:<br><code>"statusLine": {"type": "command", "command": "python3 /path/to/claude-usage/ratelimits.py"}</code> in <code>~/.claude/settings.json</code>. The desktop app doesn't run status lines; use a scheduled task that pipes its plan usage into <code>cli.py record-usage</code> (see README).</div>`;
     return;
   }
   const nowSec = Date.now() / 1000;
+  asof.classList.toggle('stale', nowSec - a.latest_ts > 8 * 3600);
+  asof.title = nowSec - a.latest_ts > 8 * 3600 ? 'No reading for over 8 hours \u2014 is the sampler or status line still running?' : '';
   asof.textContent = 'last reading ' + fmtDuration(nowSec - a.latest_ts) + ' ago'
     + (a.subscription_type ? ' \u00b7 ' + a.subscription_type : '');
   const cards = a.windows.map(w => {
@@ -2287,11 +2324,13 @@ function renderAllowance() {
     const val = s.spend_used_usd != null && s.spend_limit_usd ? `$${s.spend_used_usd.toFixed(0)} / $${s.spend_limit_usd.toFixed(0)}` : s.spend_pct.toFixed(0) + '%';
     const cls = s.spend_pct >= 90 ? 'crit' : s.spend_pct >= 70 ? 'warn' : '';
     cards.push(`<div class="allowance-win">
-      <div class="row"><span class="name">Spend limit${s.spend_period ? ' (' + esc(s.spend_period) + ')' : ''}</span><span class="pct">${val}</span></div>
+      <div class="row"><span class="name">${esc(s.label || 'Spend limit')}${s.spend_period ? ' (' + esc(s.spend_period) + ')' : ''}</span><span class="pct">${val}</span></div>
       <div class="allowance-bar"><div class="${cls}" style="width:${Math.min(100, s.spend_pct)}%"></div></div>
     </div>`);
   }
   body.innerHTML = '<div class="allowance-grid">' + cards.join('') + '</div>';
+
+  renderWeeklyHistory(a.weekly_history || []);
 
   const hist = a.history || [];
   if (charts.allowance) charts.allowance.destroy();
