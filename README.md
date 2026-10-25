@@ -115,6 +115,9 @@ python cli.py scan
 # Show today's usage summary by model (in terminal)
 python cli.py today
 
+# Show weekly plan-allowance history (5-hour and weekly caps)
+python cli.py weekly
+
 # Show the last 7 days (per-day breakdown + by-model totals)
 python cli.py week
 
@@ -132,6 +135,9 @@ python cli.py scan --projects-dir /path/to/transcripts
 
 # Generate markdown timeline for a single session
 python cli.py timeline <session_id_or_prefix>
+
+# Record desktop-app plan usage (from scheduled task or manual JSON)
+python cli.py record-usage < plan.json
 
 # List available themes
 python cli.py theme list
