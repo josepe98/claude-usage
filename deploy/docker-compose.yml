@@ -1,0 +1,29 @@
+# docker-compose.yml -- run the dashboard with Docker Engine / Docker Desktop.
+#
+# The container's HOME is /data, so mounting the host's ~/.claude at
+# /data/.claude makes the container see the same transcripts and usage.db
+# that the host CLI uses.
+#
+# Run as the current user so files written to the bind mount keep host
+# ownership: UID=$(id -u) GID=$(id -g) docker compose up
+
+services:
+  claude-usage:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: claude-usage:latest
+    container_name: claude-usage
+    user: "${UID:-1000}:${GID:-1000}"
+    ports:
+      - "8090:8090"
+    volumes:
+      # JSONL transcripts (read) + usage.db (read/write).
+      - "${HOME:?HOME must be set}/.claude:/data/.claude"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:8090/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

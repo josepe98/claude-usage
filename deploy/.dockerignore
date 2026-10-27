@@ -1,0 +1,41 @@
+.git
+.github
+.gitignore
+.gitattributes
+
+# Virtual envs and Python build artefacts.
+.venv
+venv
+env
+*.pyc
+*.pyo
+*.pyd
+__pycache__
+*.egg-info
+.eggs
+build
+dist
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.tox
+.coverage
+htmlcov
+
+# Tests are not needed in the runtime image.
+tests
+
+# Docs and editor scratch.
+docs
+*.md
+!README.md
+.idea
+.vscode
+.DS_Store
+Thumbs.db
+
+# Local databases and screenshots that sometimes land in the repo dir.
+*.db
+*.sqlite
+*.sqlite3
+*.log

@@ -1,0 +1,64 @@
+# Containerfile -- kept in sync with Dockerfile so podman build picks it up by default.
+# syntax=docker/dockerfile:1.6
+#
+# Multi-stage Dockerfile for josepe98/claude-usage.
+#
+# Stage 1 (builder): currently a no-op for dependencies because the app uses
+# only the Python standard library, but kept so future requirements.txt
+# additions slot in without restructuring the file.
+#
+# Stage 2 (runtime): python:3.12-slim, non-root user `app` (uid 1000),
+# HOME=/data so the SQLite DB lands under /data/.claude/usage.db.
+
+FROM python:3.12-slim AS builder
+
+WORKDIR /app
+
+# If/when a requirements.txt is added, install it into the user site so we can
+# copy /root/.local across into the runtime stage. The wildcard COPY is a
+# conditional copy idiom: it tolerates the file being absent.
+COPY requirements.txt* ./
+RUN if [ -f requirements.txt ]; then \
+        pip install --user --no-cache-dir -r requirements.txt; \
+    fi
+
+
+FROM python:3.12-slim AS runtime
+
+LABEL org.opencontainers.image.source="https://github.com/josepe98/claude-usage"
+LABEL org.opencontainers.image.description="Local dashboard for Claude Code usage and cost analytics."
+LABEL org.opencontainers.image.licenses="MIT"
+
+# wget is needed for the HEALTHCHECK; ca-certificates is a generic good idea.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends wget ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Non-root user. HOME=/data is the bind-mount target, so usage.db sits at
+# /data/.claude/usage.db and reads /data/.claude/projects/**/*.jsonl exactly
+# like the host CLI does.
+RUN useradd --system --uid 1000 --home /data --shell /usr/sbin/nologin app \
+    && mkdir -p /data/.claude/projects \
+    && chown -R app:app /data
+
+WORKDIR /app
+
+# Carry over any pip --user installs from the builder.
+COPY --from=builder /root/.local /home/app/.local
+ENV PATH=/home/app/.local/bin:$PATH \
+    PYTHONUNBUFFERED=1 \
+    HOME=/data
+
+# App sources. Keep this list narrow so unrelated files do not bust the cache.
+COPY --chown=app:app cli.py dashboard.py scanner.py pricing.py ./
+# cowork.py is optional in older revs; tolerate its absence.
+COPY --chown=app:app cowork.py* ./
+
+USER app
+
+EXPOSE 8090
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD wget --quiet --tries=1 --spider http://127.0.0.1:8090/api/health || exit 1
+
+CMD ["python", "cli.py", "serve", "--host", "0.0.0.0", "--port", "8090"]
