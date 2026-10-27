@@ -1,0 +1,62 @@
+{
+  "name": "claude-usage",
+  "displayName": "Claude Usage",
+  "description": "Live Claude Code spend in the VS Code status bar, sourced from the claude-usage dashboard.",
+  "version": "0.1.0",
+  "publisher": "claude-usage",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/josepe98/claude-usage.git"
+  },
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "claudeUsage.openDashboard",
+        "title": "Claude Usage: Open Dashboard"
+      },
+      {
+        "command": "claudeUsage.refresh",
+        "title": "Claude Usage: Refresh Now"
+      }
+    ],
+    "configuration": {
+      "title": "Claude Usage",
+      "properties": {
+        "claudeUsage.dashboardUrl": {
+          "type": "string",
+          "default": "http://localhost:8080",
+          "description": "Base URL of the claude-usage dashboard (no trailing slash)."
+        },
+        "claudeUsage.refreshSeconds": {
+          "type": "number",
+          "default": 30,
+          "minimum": 5,
+          "description": "How often to poll /api/data, in seconds."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "tsc -p .",
+    "watch": "tsc -p . --watch",
+    "test": "vitest run",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.75.0",
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
+  }
+}
