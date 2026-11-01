@@ -118,6 +118,14 @@ class SummaryTests(unittest.TestCase):
         self.assertIsNone(five["projected_full_at"])
         self.assertEqual(five["rate_per_hour"], 10.0)
 
+    def test_no_weekly_projection_from_short_span(self):
+        # 14% -> 15% in 32 minutes must not project the week as full.
+        self.write((NOW, payload(2, 14)), (NOW + 1920, payload(2, 15)))
+        ratelimits.ingest_snapshots(self.conn, self.snap)
+        week = ratelimits.allowance_summary(self.conn, now=NOW + 1920)["windows"][1]
+        self.assertIsNone(week["projected_full_at"])
+        self.assertIsNone(week["rate_per_hour"])
+
     def test_pace_ignores_previous_window(self):
         self.write((NOW, payload(90, 5, five_reset=NOW + 100)),
                    (NOW + 200, payload(5, 5, five_reset=NOW + 18000)),
@@ -131,6 +139,98 @@ class SummaryTests(unittest.TestCase):
         ratelimits.ingest_snapshots(self.conn, self.snap)
         five = ratelimits.allowance_summary(self.conn, now=NOW + 120)["windows"][0]
         self.assertTrue(five["reset_since_reading"])
+
+
+def desktop(five=4, week=15, fable=25, week_reset="2026-10-23T20:00:00.399Z", status="ok", extra=True):
+    plan = {"status": status, "plan": "Max", "windows": [
+        {"label": "5-hour limit", "percentUsed": five, "resetsAt": "2026-10-21T14:40:00.399Z"},
+        {"label": "Weekly \u00b7 all models", "percentUsed": week, "resetsAt": week_reset},
+        {"label": "Weekly \u00b7 Fable", "percentUsed": fable, "resetsAt": week_reset},
+    ]}
+    if extra:
+        plan["extraUsage"] = {"enabled": True, "spent": "12.50", "monthlyLimit": "50.00", "currency": "USD"}
+    return {"plan": plan, "context": {}}
+
+
+WEEK_END = 1792785600  # 2026-10-23T20:00:00Z
+
+
+class DesktopSnapshotTests(unittest.TestCase):
+    def test_parses_get_usage_result(self):
+        s = ratelimits.snapshot_from_desktop(desktop(), now=NOW)
+        self.assertEqual(s["source"], "desktop")
+        self.assertEqual(s["subscription_type"], "Max")
+        self.assertEqual(s["seven_day_pct"], 15)
+        self.assertAlmostEqual(s["seven_day_resets_at"], WEEK_END, delta=1)
+        self.assertEqual(s["model_weekly"][0]["name"], "Fable")
+        self.assertEqual(s["extra_used_usd"], 12.5)
+
+    def test_accepts_bare_plan_object(self):
+        s = ratelimits.snapshot_from_desktop(desktop()["plan"], now=NOW)
+        self.assertEqual(s["five_hour_pct"], 4)
+
+    def test_unavailable_raises(self):
+        with self.assertRaises(ValueError):
+            ratelimits.snapshot_from_desktop(desktop(status="unavailable"))
+
+    def test_no_windows_raises(self):
+        with self.assertRaises(ValueError):
+            ratelimits.snapshot_from_desktop({"plan": {"status": "ok", "windows": []}})
+
+    def test_record_main_writes_every_call_and_fails_loud(self):
+        d = Path(tempfile.mkdtemp())
+        with mock.patch.object(ratelimits, "SNAPSHOT_PATH", d / "s.jsonl"), \
+             mock.patch.object(ratelimits, "ERROR_LOG_PATH", d / "e.log"):
+            out = io.StringIO()
+            self.assertEqual(ratelimits.record_desktop_main(io.StringIO(json.dumps(desktop())), out, io.StringIO()), 0)
+            self.assertEqual(ratelimits.record_desktop_main(io.StringIO(json.dumps(desktop())), out, io.StringIO()), 0)
+            self.assertIn("RECORDED 5h 4%, weekly 15%, Fable 25%", out.getvalue())
+            err = io.StringIO()
+            self.assertEqual(ratelimits.record_desktop_main(io.StringIO("{}"), io.StringIO(), err), 1)
+            self.assertIn("FAILED", err.getvalue())
+            self.assertEqual(len((d / "s.jsonl").read_text().splitlines()), 2)
+            self.assertIn("record-usage", (d / "e.log").read_text())
+
+
+class WeeklyHistoryTests(unittest.TestCase):
+    def setUp(self):
+        self.conn = sqlite3.connect(":memory:")
+        self.snap = Path(tempfile.mkdtemp()) / "snaps.jsonl"
+
+    def add(self, snap):
+        with open(self.snap, "a") as f:
+            f.write(json.dumps(snap) + "\n")
+
+    def test_groups_by_week_mixing_sources(self):
+        prev_end = "2026-10-16T20:00:00.399Z"
+        self.add(ratelimits.snapshot_from_desktop(desktop(week=60, fable=70, week_reset=prev_end), now=WEEK_END - 9 * 86400))
+        self.add(ratelimits.snapshot_from_desktop(desktop(week=82, fable=90, week_reset=prev_end), now=WEEK_END - 7 * 86400 - 3 * 3600))
+        # status-line reading for the current week: integer reset time
+        self.add(ratelimits.snapshot_from_payload(payload(2, 14, seven_reset=WEEK_END), now=WEEK_END - 2 * 86400))
+        self.add(ratelimits.snapshot_from_desktop(desktop(week=15, fable=25), now=WEEK_END - 2 * 86400 + 600))
+        ratelimits.ingest_snapshots(self.conn, self.snap)
+        a = ratelimits.allowance_summary(self.conn, now=WEEK_END - 2 * 86400 + 700)
+        weeks = a["weekly_history"]
+        self.assertEqual(len(weeks), 2)
+        cur, prev = weeks
+        self.assertFalse(cur["complete"])
+        self.assertEqual((cur["pct"], cur["readings"], cur["models"]), (15, 2, {"Fable": 25}))
+        self.assertTrue(prev["complete"])
+        self.assertEqual((prev["pct"], prev["models"]["Fable"]), (82, 90))
+        self.assertEqual(prev["gap_hours"], 3.0)
+
+    def test_summary_includes_model_window_and_extra_usage(self):
+        self.add(ratelimits.snapshot_from_desktop(desktop(), now=NOW))
+        ratelimits.ingest_snapshots(self.conn, self.snap)
+        a = ratelimits.allowance_summary(self.conn, now=NOW)
+        self.assertEqual([w["key"] for w in a["windows"]], ["five_hour", "seven_day", "model:Fable"])
+        self.assertEqual(a["spend"]["label"], "Extra usage")
+        self.assertEqual(a["spend"]["spend_pct"], 25.0)
+
+    def test_old_table_gets_new_columns(self):
+        self.conn.execute("CREATE TABLE rate_limit_snapshots (ts REAL PRIMARY KEY, session_id TEXT, subscription_type TEXT, five_hour_pct REAL, five_hour_resets_at REAL, seven_day_pct REAL, seven_day_resets_at REAL, spend_pct REAL, spend_used_usd REAL, spend_limit_usd REAL, spend_period TEXT)")
+        self.add(ratelimits.snapshot_from_desktop(desktop(), now=NOW))
+        self.assertEqual(ratelimits.ingest_snapshots(self.conn, self.snap), 1)
 
 
 class DashboardIntegrationTests(unittest.TestCase):

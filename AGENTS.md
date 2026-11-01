@@ -6,14 +6,17 @@ Guidance for any coding agent (Codex, Claude Code, etc.) working on this reposit
 
 ## Project shape
 
-Six Python files, stdlib only, no `pip install` step. Python 3.8+.
-
+Core Python files (stdlib only, no `pip install` step, Python 3.8+):
 - [scanner.py](scanner.py) — parses Claude Code JSONL transcripts into a SQLite DB at `~/.claude/usage.db`.
-- [cli.py](cli.py) — terminal commands (`scan` / `today` / `week` / `stats` / `dashboard` / `theme`).
+- [cli.py](cli.py) — terminal commands (`scan` / `today` / `week` / `weekly` / `stats` / `dashboard` / `timeline` / `record-usage` / `theme`).
 - [dashboard.py](dashboard.py) — single-file `http.server` serving an embedded HTML/JS SPA on `localhost:8080`.
 - [pricing.py](pricing.py) — single source of truth for model pricing (Python + JS both import/inline from here). Also contains `PRICING_HISTORY` for time-keyed historic rates and `get_pricing_at()` / `calc_cost_at()` for accurate costing of old sessions.
 - [cowork.py](cowork.py) — scans Claude Desktop Cowork audit logs and merges them into the same SQLite DB.
 - [ratelimits.py](ratelimits.py) — run as Claude Code's status line, it records server-reported plan allowance (5-hour / weekly utilization) to `~/.claude/claude-usage/rate_limits.jsonl`; `scan`, `cli.py today` and `/api/data` ingest those into the `rate_limit_snapshots` table. `tests/__init__.py` redirects its file paths to a temp dir — keep that so tests never read the user's real snapshots.
+
+Deployment:
+- [Dockerfile](Dockerfile) and [compose.yaml](compose.yaml) for containerized deployment.
+- [tests/](tests/) — 25+ test files covering scanner, dashboard, pricing, ratelimits, browser rendering, and PWA features.
 
 Use `python` on Windows, `python3` on macOS/Linux. Both work the same.
 
@@ -23,8 +26,10 @@ Use `python` on Windows, `python3` on macOS/Linux. Both work the same.
 python3 cli.py scan                  # incremental scan (fast on re-run)
 python3 cli.py today                 # today's usage by model
 python3 cli.py week                  # last 7 days, per-day + by-model
+python3 cli.py weekly                # weekly plan-allowance history
 python3 cli.py stats                 # all-time stats
 python3 cli.py dashboard             # scan + open http://localhost:8080
+python3 cli.py record-usage < plan.json  # record desktop-app plan usage
 python3 cli.py scan --projects-dir PATH    # scan a custom transcripts dir
 HOST=0.0.0.0 PORT=9000 python3 cli.py dashboard
 
@@ -113,9 +118,11 @@ When merging community PRs, **preserve the original author's commit so they get 
 
 This project follows [SemVer](https://semver.org/):
 
-1. **Tags always.** Every version that lands on `main` gets an annotated git tag (`git tag -a vX.Y.Z -m "vX.Y.Z"`). Tags pay off in three places: Homebrew formula pinning, `git log vX.Y.Z-1..vX.Y.Z` for changelog work, and `gh release create` if a release needs promoting retroactively.
+1. **Tags and GitHub Releases.** Significant changes (new features, bug fixes) get annotated git tags (`git tag -a vX.Y.Z -m "vX.Y.Z"`) and GitHub Releases with release notes. Tags and releases help with Homebrew formula pinning, changelog work, and giving watchers notification of new versions.
 
-2. **Formal GitHub Releases only for major versions.** Patch and minor bumps ship as a tag and a CHANGELOG entry only. Formal `gh release create` with release notes is reserved for major versions where breaking changes warrant a notification to watchers.
+2. **Patch releases.** Bug fixes and documentation-only changes may ship as tags without formal GitHub Releases if the changes are minor. Always run the test suite before tagging.
+
+3. **CHANGELOG maintained.** Every release gets a section in `CHANGELOG.md` with the version, date, and summary of changes. During development, add a `## Unreleased` section at the top.
 
 ### Homebrew formula and self-referential SHA
 
