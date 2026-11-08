@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.7.1 — 2026-11-08
+
+- Add weekly plan-usage history tracking: `ratelimits.py` logs the highest usage reading within each weekly window, per model (Fable budgets), and extra-usage spend if applicable
+- Add `cli.py weekly` command to show per-week totals and plan limits in the terminal
+- Update dashboard Files table to document `ratelimits.py`
+
 ## v1.7.0 — 2026-10-21
 
 - Add plan-allowance tracking for Claude.ai Pro / Max subscribers: `ratelimits.py` runs as Claude Code's status line, shows `5h N% · wk N%`, and records the server-reported 5-hour and weekly utilization to `~/.claude/claude-usage/rate_limits.jsonl`
