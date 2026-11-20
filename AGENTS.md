@@ -38,7 +38,7 @@ python3 -m unittest tests.test_scanner -v            # one file
 python3 -m unittest tests.test_scanner.TestProjectNameFromCwd.test_windows_path  # one test
 ```
 
-CI ([.github/workflows/tests.yml](.github/workflows/tests.yml)) runs the suite on Python 3.9 / 3.11 / 3.12 against `main` and PRs.
+CI ([.github/workflows/tests.yml](.github/workflows/tests.yml)) runs the suite on Python 3.11 / 3.12 against `main` and PRs.
 
 ## Architecture
 

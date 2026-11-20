@@ -8,11 +8,10 @@ on:
 
 jobs:
   test:
-    # ubuntu-latest (26.04) has no Python 3.9 build; 24.04 still does.
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.9", "3.11", "3.12"]
+        python-version: ["3.11", "3.12"]
 
     steps:
       - uses: actions/checkout@v4
