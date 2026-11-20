@@ -6,7 +6,7 @@ Guidance for any coding agent (Codex, Claude Code, etc.) working on this reposit
 
 ## Project shape
 
-Core Python files (stdlib only, no `pip install` step, Python 3.8+):
+Core Python files (stdlib only, no `pip install` step, Python 3.11+):
 - [scanner.py](scanner.py) — parses Claude Code JSONL transcripts into a SQLite DB at `~/.claude/usage.db`.
 - [cli.py](cli.py) — terminal commands (`scan` / `today` / `week` / `weekly` / `stats` / `dashboard` / `timeline` / `record-usage` / `theme`).
 - [dashboard.py](dashboard.py) — single-file `http.server` serving an embedded HTML/JS SPA on `localhost:8080`.
@@ -38,7 +38,7 @@ python3 -m unittest tests.test_scanner -v            # one file
 python3 -m unittest tests.test_scanner.TestProjectNameFromCwd.test_windows_path  # one test
 ```
 
-CI ([.github/workflows/tests.yml](.github/workflows/tests.yml)) runs the suite on Python 3.9 / 3.11 / 3.12 against `main` and PRs.
+CI ([.github/workflows/tests.yml](.github/workflows/tests.yml)) runs the suite on Python 3.11 / 3.12 against `main` and PRs.
 
 ## Architecture
 
