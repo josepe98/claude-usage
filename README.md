@@ -60,7 +60,7 @@ Captures usage from:
 
 ## Requirements
 
-- Python 3.8+
+- Python 3.11+
 - No third-party packages — uses only the standard library (`sqlite3`, `http.server`, `json`, `pathlib`)
 
 > Anyone running Claude Code already has Python installed.
