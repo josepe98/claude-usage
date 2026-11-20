@@ -110,6 +110,12 @@ def init_db(conn):
         conn.execute("SELECT session_name FROM sessions LIMIT 1")
     except sqlite3.OperationalError:
         conn.execute("ALTER TABLE sessions ADD COLUMN session_name TEXT")
+    # origin_kind ("scheduled" / "human" / "unknown"); filled for older rows by
+    # backfill_origin() on the next scan.
+    try:
+        conn.execute("SELECT origin_kind FROM sessions LIMIT 1")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE sessions ADD COLUMN origin_kind TEXT")
     # Conditional unique index: only dedup non-null message IDs
     conn.execute("""
         CREATE UNIQUE INDEX IF NOT EXISTS idx_turns_message_id
@@ -138,6 +144,22 @@ def extract_session_name(record, current_custom, current_agent):
 def resolve_session_name(custom_title, agent_name):
     """Return the preferred display name: customTitle first, agentName second."""
     return custom_title or agent_name or None
+
+
+def extract_origin(record, current):
+    """Session origin from the record's `origin` field: "scheduled" for
+    scheduled-task runs, "human" for sessions a person started. The first
+    value seen wins; later records keep it."""
+    if current:
+        return current
+    origin = record.get("origin")
+    if not isinstance(origin, dict):
+        return None
+    if origin.get("subkind") == "scheduled-trigger":
+        return "scheduled"
+    if origin.get("kind") == "human":
+        return "human"
+    return None
 
 
 def project_name_from_cwd(cwd):
@@ -189,6 +211,7 @@ def parse_jsonl_file(filepath):
                         "model": None,
                         "custom_title": None,
                         "agent_name": None,
+                        "origin_kind": None,
                     }
 
                 # Capture session_name from any record (custom-title / agent-name types
@@ -197,6 +220,7 @@ def parse_jsonl_file(filepath):
                 meta["custom_title"], meta["agent_name"] = extract_session_name(
                     record, meta["custom_title"], meta["agent_name"]
                 )
+                meta["origin_kind"] = extract_origin(record, meta["origin_kind"])
 
                 rtype = record.get("type")
                 if rtype not in ("assistant", "user"):
@@ -334,14 +358,14 @@ def upsert_sessions(conn, sessions):
                     (session_id, project_name, first_timestamp, last_timestamp,
                      git_branch, total_input_tokens, total_output_tokens,
                      total_cache_read, total_cache_creation, total_cache_1h, model, turn_count,
-                     session_name)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     session_name, origin_kind)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 s["session_id"], s["project_name"], s["first_timestamp"],
                 s["last_timestamp"], s["git_branch"],
                 s["total_input_tokens"], s["total_output_tokens"],
                 s["total_cache_read"], s["total_cache_creation"], s.get("total_cache_1h", 0),
-                s["model"], s["turn_count"], s.get("session_name")
+                s["model"], s["turn_count"], s.get("session_name"), s.get("origin_kind")
             ))
         else:
             # Update: add new tokens on top of existing (since we only insert new turns)
@@ -368,7 +392,8 @@ def upsert_sessions(conn, sessions):
                     total_cache_1h = total_cache_1h + ?,
                     turn_count = turn_count + ?,
                     model = ?,
-                    session_name = COALESCE(NULLIF(?, ''), session_name)
+                    session_name = COALESCE(NULLIF(?, ''), session_name),
+                    origin_kind = COALESCE(origin_kind, ?)
                 WHERE session_id = ?
             """, (
                 s["last_timestamp"],
@@ -377,6 +402,7 @@ def upsert_sessions(conn, sessions):
                 s.get("total_cache_1h", 0),
                 s["turn_count"], model_to_set,
                 s.get("session_name"),
+                s.get("origin_kind"),
                 s["session_id"]
             ))
 
@@ -400,6 +426,43 @@ def insert_turns(conn, turns):
          t["tool_name"], t["cwd"], t.get("message_id", ""))
         for t in turns
     ])
+
+
+BACKFILL_MAX_LINES = 400
+
+
+def backfill_origin(conn, jsonl_files):
+    """Fill origin_kind for sessions scanned before it existed. Reads only
+    the start of each transcript (the origin is on the opening prompt), so
+    it's cheap, and it marks sessions with no origin record as "unknown" so
+    the work isn't repeated on every scan. Returns rows updated."""
+    missing = {r[0] for r in conn.execute("SELECT session_id FROM sessions WHERE origin_kind IS NULL")}
+    if not missing:
+        return 0
+    found = {}
+    for filepath in jsonl_files:
+        try:
+            with open(filepath, encoding="utf-8", errors="replace") as f:
+                for n, line in enumerate(f):
+                    if n >= BACKFILL_MAX_LINES:
+                        break
+                    if '"origin"' not in line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    sid = record.get("sessionId")
+                    if sid in missing and sid not in found:
+                        kind = extract_origin(record, None)
+                        if kind:
+                            found[sid] = kind
+        except OSError:
+            continue
+    rows = [(found.get(sid, "unknown"), sid) for sid in missing]
+    conn.executemany("UPDATE sessions SET origin_kind = ? WHERE session_id = ?", rows)
+    conn.commit()
+    return len(rows)
 
 
 def scan(projects_dir=None, projects_dirs=None, db_path=DB_PATH, verbose=True):
@@ -526,6 +589,7 @@ def scan(projects_dir=None, projects_dirs=None, db_path=DB_PATH, verbose=True):
                                 "model": None,
                                 "custom_title": None,
                                 "agent_name": None,
+                                "origin_kind": None,
                             }
 
                         # Capture session_name updates from any record
@@ -533,6 +597,7 @@ def scan(projects_dir=None, projects_dirs=None, db_path=DB_PATH, verbose=True):
                         meta["custom_title"], meta["agent_name"] = extract_session_name(
                             record, meta["custom_title"], meta["agent_name"]
                         )
+                        meta["origin_kind"] = extract_origin(record, meta["origin_kind"])
 
                         rtype = record.get("type")
                         if rtype not in ("assistant", "user"):
@@ -636,6 +701,8 @@ def scan(projects_dir=None, projects_dirs=None, db_path=DB_PATH, verbose=True):
                 turn_count = COALESCE((SELECT COUNT(*) FROM turns WHERE turns.session_id = sessions.session_id), 0)
         """)
         conn.commit()
+
+    backfill_origin(conn, jsonl_files)
 
     # Plan-allowance snapshots written by the ratelimits.py status line.
     # Default scans only, same rule as Cowork above.
