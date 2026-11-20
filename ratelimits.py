@@ -319,7 +319,9 @@ def _window_summary(rows, key, label, now, length):
         "rate_per_hour": None,
         "projected_full_at": None,
     }
-    if out["reset_since_reading"]:
+    # The desktop app reports a window with no reset time when none is
+    # active (e.g. "5-hour limit" at 0% before the first message).
+    if out["reset_since_reading"] or resets_at is None:
         return out
     # Average pace across this window: first vs latest reading that share
     # the same resets_at.

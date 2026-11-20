@@ -562,7 +562,14 @@ def get_dashboard_data(db_path=None):
         ratelimits.ingest_snapshots(conn)
     except Exception as e:
         print(f"Warning: rate-limit snapshots not ingested: {e}")
-    allowance = ratelimits.allowance_summary(conn)
+    # A failure here must not take the rest of the dashboard down with it.
+    allowance_error = None
+    try:
+        allowance = ratelimits.allowance_summary(conn)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        allowance, allowance_error = None, f"{type(e).__name__}: {e}"
     conn.close()
 
     return {
@@ -572,6 +579,7 @@ def get_dashboard_data(db_path=None):
         "sessions_all":    sessions_all,
         "plan_recommendation": plan_recommendation,
         "allowance":       allowance,
+        "allowance_error": allowance_error,
         "dow_hour":        dow_hour,
         "streak":          streak,
         "generated_at":       datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -2287,6 +2295,13 @@ function renderAllowance() {
   const asof = document.getElementById('allowance-asof');
   const histWrap = document.getElementById('allowance-history-wrap');
   if (!body) return;
+  if (rawData && rawData.allowance_error) {
+    asof.textContent = '';
+    histWrap.style.display = 'none';
+    renderWeeklyHistory([]);
+    body.innerHTML = `<div class="allowance-empty" style="color:#ef4444">Plan allowance couldn't be summarised: <code>${esc(rawData.allowance_error)}</code>. The traceback is in the dashboard server's output.</div>`;
+    return;
+  }
   if (!a || !a.windows.length) {
     asof.textContent = '';
     histWrap.style.display = 'none';
@@ -2304,6 +2319,8 @@ function renderAllowance() {
     if (w.reset_since_reading) {
       pct = 0;
       sub = `Reset at ${esc(fmtWhen(w.resets_at))} \u2014 no reading since (last was ${w.pct.toFixed(0)}%)`;
+    } else if (w.resets_at == null) {
+      sub = 'No active window \u2014 starts with your next message';
     } else {
       sub = `Resets in ${esc(fmtDuration(w.resets_at - nowSec))} (${esc(fmtWhen(w.resets_at))})`;
       if (w.projected_full_at) {
