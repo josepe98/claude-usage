@@ -169,16 +169,20 @@ Claude Code writes one JSONL file per session to `~/.claude/projects/`. Each lin
 
 ## Cost estimates
 
-Costs are calculated using **Anthropic API pricing as of August 2026** ([claude.com/pricing#api](https://claude.com/pricing#api)).
+Costs are calculated using **Anthropic API pricing as of November 2026** ([platform.claude.com pricing](https://platform.claude.com/docs/en/about-claude/pricing)).
 
-**Only models whose name contains `opus`, `sonnet`, or `haiku` are included in cost calculations.** Local models, unknown models, and any other model names are excluded (shown as `n/a`). The table below shows representative models; `pricing.py` tracks all variants (4-5, 4-6, 4-7) with the same tier pricing per family.
+**Only models with a price in `pricing.py` are included in cost calculations** — the Fable, Mythos, Opus, Sonnet and Haiku families. A model name that matches no entry but contains one of those family names is priced as the newest model of that family. Local models, unknown models, and any other model names are excluded (shown as `n/a`). The table below shows current models; `pricing.py` also lists older ones.
 
-| Model | Input | Output | Cache Write | Cache Read |
-|-------|-------|--------|------------|-----------|
-| claude-opus-4-7 | $5.00/MTok | $25.00/MTok | $6.25/MTok | $0.50/MTok |
-| claude-opus-4-6 | $5.00/MTok | $25.00/MTok | $6.25/MTok | $0.50/MTok |
-| claude-sonnet-4-6 | $3.00/MTok | $15.00/MTok | $3.75/MTok | $0.30/MTok |
-| claude-haiku-4-5 | $1.00/MTok | $5.00/MTok | $1.25/MTok | $0.10/MTok |
+| Model | Input | Output | 5m Cache Write | 1h Cache Write | Cache Read |
+|-------|-------|--------|----------------|----------------|-----------|
+| claude-fable-5-2 | $8.00/MTok | $40.00/MTok | $10.00/MTok | $16.00/MTok | $0.20/MTok |
+| claude-fable-5-1 | $10.00/MTok | $50.00/MTok | $12.50/MTok | $20.00/MTok | $0.25/MTok |
+| claude-fable-5 | $10.00/MTok | $50.00/MTok | $12.50/MTok | $20.00/MTok | $1.00/MTok |
+| claude-opus-5-5 | $4.00/MTok | $20.00/MTok | $5.00/MTok | $8.00/MTok | $0.20/MTok |
+| claude-sonnet-5-5 | $2.00/MTok | $10.00/MTok | $2.50/MTok | $4.00/MTok | $0.10/MTok |
+| claude-haiku-5-5 | $0.10/MTok | $0.50/MTok | $0.125/MTok | $0.20/MTok | $0.01/MTok |
+
+Mythos models are priced the same as the matching Fable model. Haiku 5.5 is costed at its rates for prompts up to 100K tokens; longer prompts are billed at 5x and will be understated.
 
 > **Note:** These are API prices. If you use Claude Code via a Max or Pro subscription, your actual cost structure is different (subscription-based, not per-token).
 

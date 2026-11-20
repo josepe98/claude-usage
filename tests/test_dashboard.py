@@ -417,10 +417,10 @@ class TestHTMLTemplate(unittest.TestCase):
         self.assertIn('crossorigin="anonymous"', HTML_TEMPLATE)
 
     def test_template_has_substring_matching(self):
-        """Verify getPricing falls back to substring match for unknown models."""
-        self.assertIn("m.includes('opus')", HTML_TEMPLATE)
-        self.assertIn("m.includes('sonnet')", HTML_TEMPLATE)
-        self.assertIn("m.includes('haiku')", HTML_TEMPLATE)
+        """Verify getPricing falls back to a family keyword match for unknown
+        models, using the FAMILY_FALLBACK list inlined from pricing.py."""
+        self.assertIn("const FAMILY_FALLBACK = /*__FAMILY_FALLBACK_JSON__*/;", HTML_TEMPLATE)
+        self.assertIn("for (const [keyword, latest] of FAMILY_FALLBACK)", HTML_TEMPLATE)
 
     def test_unknown_models_return_null(self):
         """Verify getPricing returns null for non-Anthropic models."""

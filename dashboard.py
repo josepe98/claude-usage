@@ -10,7 +10,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 from pathlib import Path
 
-from pricing import PRICING
+from pricing import PRICING, FAMILY_FALLBACK
 import ratelimits
 from datetime import datetime, timedelta, date
 
@@ -1491,23 +1491,25 @@ function tzDisplayName(tzMode) {
 
 // ── Pricing (Anthropic API, April 2026) ────────────────────────────────────
 const PRICING = /*__PRICING_JSON__*/;
+const FAMILY_FALLBACK = /*__FAMILY_FALLBACK_JSON__*/;
+// Longest key first so "claude-opus-5-5-<date>" doesn't match "claude-opus-5".
+const PRICING_KEYS_BY_LENGTH = Object.keys(PRICING).sort((a, b) => b.length - a.length);
 
+// Billable = has a price in pricing.py (directly or via a family fallback).
 function isBillable(model) {
-  if (!model) return false;
-  const m = model.toLowerCase();
-  return m.includes('opus') || m.includes('sonnet') || m.includes('haiku');
+  return getPricing(model) !== null;
 }
 
 function getPricing(model) {
   if (!model) return null;
   if (PRICING[model]) return PRICING[model];
-  for (const key of Object.keys(PRICING)) {
+  for (const key of PRICING_KEYS_BY_LENGTH) {
     if (model.startsWith(key)) return PRICING[key];
   }
   const m = model.toLowerCase();
-  if (m.includes('opus'))   return PRICING['claude-opus-4-7'];
-  if (m.includes('sonnet')) return PRICING['claude-sonnet-4-6'];
-  if (m.includes('haiku'))  return PRICING['claude-haiku-4-5'];
+  for (const [keyword, latest] of FAMILY_FALLBACK) {
+    if (m.includes(keyword)) return PRICING[latest];
+  }
   return null;
 }
 
@@ -1635,6 +1637,8 @@ function modelLabel(m) {
   if (ml.includes('haiku'))  tier = 'haiku';
   else if (ml.includes('sonnet')) tier = 'sonnet';
   else if (ml.includes('opus'))   tier = 'opus';
+  else if (ml.includes('fable'))  tier = 'fable';
+  else if (ml.includes('mythos')) tier = 'mythos';
   if (!tier) return m;
   // Extract version number: prefer x.y pattern after the tier name
   const vMatch = ml.match(new RegExp(tier + '[^0-9]*([0-9]+)[^0-9]+([0-9]+)'));
@@ -2013,7 +2017,7 @@ function renderSessionDetail(detail) {
 
 // ── Renderers ────────────────────────────────────────────────────────────────────────────
 function _costSub(t) {
-  const base = 'API pricing, Apr 2026';
+  const base = 'API pricing, Nov 2026';
   if (!t || !t.nonBillableCount) return base;
   const n = t.nonBillableCount;
   return base + ' • ' + n + ' model' + (n === 1 ? '' : 's') + ' excluded';
@@ -2941,6 +2945,7 @@ def render_html():
     return (
         HTML_TEMPLATE
         .replace("/*__PRICING_JSON__*/", json.dumps(PRICING))
+        .replace("/*__FAMILY_FALLBACK_JSON__*/", json.dumps(FAMILY_FALLBACK))
         .replace("{git_hash_html}", git_hash_html)
     ).encode("utf-8")
 
