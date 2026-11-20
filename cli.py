@@ -71,24 +71,27 @@ def print_allowance(conn):
         print(f"  Warning: rate-limit snapshots not ingested: {e}")
     a = ratelimits.allowance_summary(conn)
     if not a or not a["windows"]:
-        print("  Plan allowance:   no readings (set ratelimits.py as your status line; see README)")
+        print("  Plan allowance:     no readings (set ratelimits.py as your status line; see README)")
         return
     for w in a["windows"]:
-        name = "5-hour" if w["key"] == "five_hour" else "Weekly"
+        name = {"five_hour": "5-hour", "seven_day": "Weekly"}.get(w["key"], w["key"].split(":", 1)[-1] + " weekly")
         if w["reset_since_reading"]:
-            print(f"  {name + ' limit:':<18}reset at {_fmt_when(w['resets_at'])}, no reading since")
+            print(f"  {name + ' limit:':<20}reset at {_fmt_when(w['resets_at'])}, no reading since")
             continue
-        line = f"  {name + ' limit:':<18}{w['pct']:.0f}% used, resets {_fmt_when(w['resets_at'])}"
+        if w["resets_at"] is None:
+            print(f"  {name + ' limit:':<20}{w['pct']:.0f}% used, no active window")
+            continue
+        line = f"  {name + ' limit:':<20}{w['pct']:.0f}% used, resets {_fmt_when(w['resets_at'])}"
         if w["projected_full_at"]:
             line += f"  (!) full at {_fmt_when(w['projected_full_at'])} at this pace"
         print(line)
     if a["spend"]:
         sp = a["spend"]
         if sp["spend_used_usd"] is not None and sp["spend_limit_usd"]:
-            print(f"  {'Spend limit:':<18}${sp['spend_used_usd']:.2f} of ${sp['spend_limit_usd']:.2f}")
+            print(f"  {sp.get('label', 'Spend limit') + ':':<20}${sp['spend_used_usd']:.2f} of ${sp['spend_limit_usd']:.2f}")
         else:
-            print(f"  {'Spend limit:':<18}{sp['spend_pct']:.0f}% used")
-    print(f"  {'':<18}(last reading {_fmt_duration(a['age_seconds'])} ago)")
+            print(f"  {sp.get('label', 'Spend limit') + ':':<20}{sp['spend_pct']:.0f}% used")
+    print(f"  {'':<20}(last reading {_fmt_duration(a['age_seconds'])} ago)")
 
 
 def cmd_record_usage():

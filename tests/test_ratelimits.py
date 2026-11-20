@@ -233,6 +233,44 @@ class WeeklyHistoryTests(unittest.TestCase):
         self.assertEqual(ratelimits.ingest_snapshots(self.conn, self.snap), 1)
 
 
+class MissingResetTests(unittest.TestCase):
+    """The desktop app sends "5-hour limit" with no resetsAt when no window is active."""
+
+    def setUp(self):
+        self.conn = sqlite3.connect(":memory:")
+        self.snap = Path(tempfile.mkdtemp()) / "snaps.jsonl"
+
+    def idle_plan(self):
+        d = desktop(five=0)
+        d["plan"]["windows"][0].pop("resetsAt")
+        return d
+
+    def test_latest_reading_without_reset_does_not_crash(self):
+        with open(self.snap, "w") as f:
+            f.write(json.dumps(ratelimits.snapshot_from_desktop(desktop(five=12), now=NOW - 7200)) + "\n")
+            f.write(json.dumps(ratelimits.snapshot_from_desktop(self.idle_plan(), now=NOW)) + "\n")
+        ratelimits.ingest_snapshots(self.conn, self.snap)
+        five = ratelimits.allowance_summary(self.conn, now=NOW)["windows"][0]
+        self.assertEqual(five["pct"], 0)
+        self.assertIsNone(five["resets_at"])
+        self.assertFalse(five["reset_since_reading"])
+        self.assertIsNone(five["projected_full_at"])
+
+    def test_dashboard_survives_allowance_failure(self):
+        from scanner import get_db, init_db
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            db = Path(f.name)
+        conn = get_db(db)
+        init_db(conn)
+        conn.close()
+        with mock.patch.object(ratelimits, "allowance_summary", side_effect=IndexError("boom")), \
+             mock.patch("traceback.print_exc"):
+            data = dashboard.get_dashboard_data(db_path=db)
+        self.assertIsNone(data["allowance"])
+        self.assertEqual(data["allowance_error"], "IndexError: boom")
+        self.assertIn("sessions_all", data)
+
+
 class DashboardIntegrationTests(unittest.TestCase):
     def test_api_data_includes_allowance(self):
         from scanner import get_db, init_db
