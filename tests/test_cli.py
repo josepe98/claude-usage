@@ -36,24 +36,21 @@ class TestGetPricing(unittest.TestCase):
         self.assertEqual(p["input"], 3.00)
         self.assertEqual(p["output"], 15.00)
 
+    # Names no key matches fall back to the newest model of their family.
     def test_substring_match_opus(self):
-        p = get_pricing("new-opus-5-model")
-        self.assertEqual(p["input"], 5.00)
-        self.assertEqual(p["output"], 25.00)
+        self.assertEqual(get_pricing("new-opus-5-model"), PRICING["claude-opus-5-5"])
 
     def test_substring_match_sonnet(self):
-        p = get_pricing("custom-sonnet-variant")
-        self.assertEqual(p["input"], 3.00)
-        self.assertEqual(p["output"], 15.00)
+        self.assertEqual(get_pricing("custom-sonnet-variant"), PRICING["claude-sonnet-5-5"])
 
     def test_substring_match_haiku(self):
-        p = get_pricing("experimental-haiku-fast")
-        self.assertEqual(p["input"], 1.00)
-        self.assertEqual(p["output"], 5.00)
+        self.assertEqual(get_pricing("experimental-haiku-fast"), PRICING["claude-haiku-5-5"])
+
+    def test_substring_match_fable(self):
+        self.assertEqual(get_pricing("claude-fable-6"), PRICING["claude-fable-5-2"])
 
     def test_substring_match_case_insensitive(self):
-        p = get_pricing("Claude-Opus-Next")
-        self.assertEqual(p["input"], 5.00)
+        self.assertEqual(get_pricing("Claude-Opus-Next"), PRICING["claude-opus-5-5"])
 
     def test_prefix_takes_precedence_over_substring(self):
         # Exact prefix match should win over substring fallback
