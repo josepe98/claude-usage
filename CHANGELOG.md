@@ -1,10 +1,19 @@
 # Changelog
 
-## Unreleased
+## v1.8.0 — 2026-11-20
 
-- Fix model pricing for current models: add Fable 5 / 5.1 / 5.2 and Mythos 5 / 5.1 / 5.2 (previously costed at $0 and left out of the default model filter), plus Opus 4.8 / 5 / 5.5, Sonnet 5 / 5.5 and Haiku 5.5, at the November 2026 rates (Opus 5.5 and Haiku 5.5 were costed at older, higher 4.x rates)
-- Price lookup tries the longest model-ID prefix first, and unknown family names fall back to the newest model of that family
-- A model counts as billable when it has a price in `pricing.py`; Fable and Mythos sessions now rank above Opus when choosing a session's primary model
+**Pricing**
+- Price Fable 5 / 5.1 / 5.2 and Mythos 5 / 5.1 / 5.2, which were costed at $0, shown as "n/a" and left out of the default model filter; add Opus 4.8 / 5 / 5.5, Sonnet 5 / 5.5 and Haiku 5.5 at the November 2026 rates (Opus 5.5 and Haiku 5.5 were costed at older, higher 4.x rates) (#75)
+- Price lookup tries the longest model-ID prefix first, and unknown family names fall back to the newest model of that family (#75)
+- A model counts as billable when it has a price in `pricing.py`; Fable and Mythos sessions rank above Opus when choosing a session's primary model (#75)
+
+**Dashboard**
+- Recent Sessions hides scheduled-task runs (such as the plan-usage sampler) behind a "Scheduled runs (N)" toggle; they still count in every total (#74)
+- The server scans for new transcripts automatically, at most once a minute, so new sessions appear without a Rescan (#74)
+- Fix the dashboard showing no data when no 5-hour window was active; a failing allowance summary no longer blanks the rest of the page (#72)
+
+**Requirements**
+- Python 3.11 or later is now required; CI tests 3.11 and 3.12 (#73)
 
 ## v1.7.1 — 2026-11-08
 
