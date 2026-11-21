@@ -507,7 +507,7 @@ def get_dashboard_data(db_path=None):
     # session_name / origin_kind may be missing on older DB schemas; select
     # NULL for whichever column isn't there yet.
     have = {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}
-    optional = ", ".join(c if c in have else f"NULL AS {c}" for c in ("session_name", "origin_kind"))
+    optional = ", ".join(c if c in have else f"NULL AS {c}" for c in ("session_name", "origin_kind", "total_cache_1h"))
     session_rows = conn.execute(f"""
         SELECT
             session_id, project_name, first_timestamp, last_timestamp,
@@ -543,28 +543,24 @@ def get_dashboard_data(db_path=None):
             "output":        r["total_output_tokens"] or 0,
             "cache_read":    r["total_cache_read"] or 0,
             "cache_creation": r["total_cache_creation"] or 0,
+            "cache_1h":      r["total_cache_1h"] or 0,
         })
 
     # Plan comparison — compute month-to-date USD inline.
-    from pricing import get_pricing as _gp_plan
+    from pricing import calc_cost as _cc_plan
     from datetime import date as _dt_plan
     _mp = _dt_plan.today().strftime("%Y-%m")
     _pmtd = 0.0
     for r in conn.execute("""
         SELECT model,
                SUM(input_tokens) as inp, SUM(output_tokens) as out,
-               SUM(cache_read_tokens) as cr, SUM(cache_creation_tokens) as cw
+               SUM(cache_read_tokens) as cr, SUM(cache_creation_tokens) as cw,
+               SUM(cache_1h_tokens) as c1h
         FROM turns
         WHERE substr(timestamp, 1, 7) = ?
         GROUP BY model
     """, (_mp,)).fetchall():
-        _p = _gp_plan(r["model"])
-        if not _p:
-            continue
-        _pmtd += ((r["inp"] or 0) * _p["input"]
-                  + (r["out"] or 0) * _p["output"]
-                  + (r["cr"] or 0) * _p["cache_read"]
-                  + (r["cw"] or 0) * _p["cache_write"]) / 1_000_000
+        _pmtd += _cc_plan(r["model"], r["inp"], r["out"], r["cr"], r["cw"], r["c1h"])
     plan_recommendation = _plan_comparison(_pmtd)
     dow_hour = _dow_hour_heatmap(conn)
     _tags_map = _load_tags()
@@ -1823,24 +1819,26 @@ function applyFilter() {
   // Daily chart: aggregate by day
   const dailyMap = {};
   for (const r of filteredDaily) {
-    if (!dailyMap[r.day]) dailyMap[r.day] = { day: r.day, input: 0, output: 0, cache_read: 0, cache_creation: 0 };
+    if (!dailyMap[r.day]) dailyMap[r.day] = { day: r.day, input: 0, output: 0, cache_read: 0, cache_creation: 0, cache_1h: 0 };
     const d = dailyMap[r.day];
     d.input          += r.input;
     d.output         += r.output;
     d.cache_read     += r.cache_read;
     d.cache_creation += r.cache_creation;
+    d.cache_1h       += r.cache_1h || 0;
   }
   const daily = Object.values(dailyMap).sort((a, b) => a.day.localeCompare(b.day));
 
   // By model: aggregate tokens + turns from daily data
   const modelMap = {};
   for (const r of filteredDaily) {
-    if (!modelMap[r.model]) modelMap[r.model] = { model: r.model, input: 0, output: 0, cache_read: 0, cache_creation: 0, turns: 0, sessions: 0 };
+    if (!modelMap[r.model]) modelMap[r.model] = { model: r.model, input: 0, output: 0, cache_read: 0, cache_creation: 0, cache_1h: 0, turns: 0, sessions: 0 };
     const m = modelMap[r.model];
     m.input          += r.input;
     m.output         += r.output;
     m.cache_read     += r.cache_read;
     m.cache_creation += r.cache_creation;
+    m.cache_1h       += r.cache_1h || 0;
     m.turns          += r.turns;
   }
 
