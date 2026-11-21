@@ -6,6 +6,8 @@ import json
 import os
 import sqlite3
 import subprocess
+import threading
+import time
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 from pathlib import Path
@@ -401,6 +403,33 @@ def _session_sparklines(conn, session_ids):
     return out
 
 
+# Incremental scan before serving /api/data, so new transcripts show up
+# without a manual Rescan. Off unless serve() turns it on: tests call the
+# handler against temporary DBs and must not pull in real transcripts.
+AUTO_SCAN = False
+AUTO_SCAN_INTERVAL = 60  # seconds between scans
+_scan_lock = threading.Lock()
+_last_scan = 0.0
+
+
+def _maybe_scan():
+    global _last_scan
+    if not AUTO_SCAN or time.time() - _last_scan < AUTO_SCAN_INTERVAL:
+        return
+    # A scan already running in another request thread is good enough.
+    if not _scan_lock.acquire(blocking=False):
+        return
+    try:
+        import scanner
+        scanner.scan(db_path=DB_PATH, verbose=False)
+    except Exception:
+        import traceback
+        traceback.print_exc()
+    finally:
+        _last_scan = time.time()
+        _scan_lock.release()
+
+
 def get_dashboard_data(db_path=None):
     # Look up DB_PATH at call time, not at def time, so tests that patch
     # ``dashboard.DB_PATH`` (or ``scanner.DB_PATH``) are honoured.
@@ -475,28 +504,19 @@ def get_dashboard_data(db_path=None):
     } for r in hourly_rows]
 
     # ── All sessions (client filters by range and model) ──────────────────────
-    # session_name may be missing on older DB schemas; fall back gracefully.
-    try:
-        session_rows = conn.execute("""
-            SELECT
-                session_id, project_name, first_timestamp, last_timestamp,
-                total_input_tokens, total_output_tokens,
-                total_cache_read, total_cache_creation, model, turn_count,
-                git_branch, session_name
-            FROM sessions
-            ORDER BY last_timestamp DESC
-        """).fetchall()
-    except sqlite3.OperationalError:
-        # Pre-migration DB: synthesise session_name=None
-        session_rows = conn.execute("""
-            SELECT
-                session_id, project_name, first_timestamp, last_timestamp,
-                total_input_tokens, total_output_tokens,
-                total_cache_read, total_cache_creation, model, turn_count,
-                git_branch, NULL AS session_name
-            FROM sessions
-            ORDER BY last_timestamp DESC
-        """).fetchall()
+    # session_name / origin_kind may be missing on older DB schemas; select
+    # NULL for whichever column isn't there yet.
+    have = {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}
+    optional = ", ".join(c if c in have else f"NULL AS {c}" for c in ("session_name", "origin_kind"))
+    session_rows = conn.execute(f"""
+        SELECT
+            session_id, project_name, first_timestamp, last_timestamp,
+            total_input_tokens, total_output_tokens,
+            total_cache_read, total_cache_creation, model, turn_count,
+            git_branch, {optional}
+        FROM sessions
+        ORDER BY last_timestamp DESC
+    """).fetchall()
 
     sessions_all = []
     for r in session_rows:
@@ -510,6 +530,7 @@ def get_dashboard_data(db_path=None):
             "session_id":      r["session_id"][:8],
             "session_id_full": r["session_id"],
             "session_name":    r["session_name"] or "",
+            "scheduled":       r["origin_kind"] == "scheduled",
             "project":         r["project_name"] or "unknown",
             "branch":          r["git_branch"] or "",
             "first":           (r["first_timestamp"] or "")[:16].replace("T", " "),
@@ -1078,6 +1099,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .allowance-asof { color: var(--muted); font-size: 11px; }
   .allowance-empty { color: var(--muted); font-size: 12px; line-height: 1.6; }
   .allowance-asof.stale { color: #ef4444; font-weight: 600; }
+  .sched-toggle { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--muted); white-space: nowrap; cursor: pointer; }
   .weekly-hist { margin-top: 16px; }
   .weekly-hist h3 { font-size: 12px; font-weight: 600; color: var(--text); margin-bottom: 8px; }
   .weekly-hist table { width: 100%; border-collapse: collapse; font-size: 12px; }
@@ -1286,7 +1308,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     </table>
   </div>
   <div class="table-card">
-    <div class="section-header"><div class="section-title">Recent Sessions</div><div class="section-actions"><input id="sessions-search" type="search" placeholder="Search project / branch / session…" oninput="_onSearchInput(this.value)" style="width:100%; max-width:320px; padding:6px 10px; background: var(--card); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 12px;"><button class="md-btn" onclick="copySessionsMD()" title="Copy table as markdown">&#x1f4cb; MD</button><button class="export-btn" onclick="exportSessionsCSV()" title="Export all filtered sessions to CSV">&#x2913; CSV</button></div></div>
+    <div class="section-header"><div class="section-title">Recent Sessions</div><div class="section-actions"><input id="sessions-search" type="search" placeholder="Search project / branch / session…" oninput="_onSearchInput(this.value)" style="width:100%; max-width:320px; padding:6px 10px; background: var(--card); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 12px;"><label class="sched-toggle" title="Sessions started by scheduled tasks (e.g. the plan-usage sampler). They always count in the totals above."><input type="checkbox" id="show-scheduled" onchange="_onShowScheduled(this.checked)"><span>Scheduled runs (<span id="sched-count">0</span>)</span></label><button class="md-btn" onclick="copySessionsMD()" title="Copy table as markdown">&#x1f4cb; MD</button><button class="export-btn" onclick="exportSessionsCSV()" title="Export all filtered sessions to CSV">&#x2913; CSV</button></div></div>
     <div class="hint" style="margin-bottom:12px;">Click a session row for branch, tool, cwd, and turn history detail.</div>
     <table id="sessions-table">
       <thead><tr>
@@ -1913,12 +1935,13 @@ function applyFilter() {
   lastByProject = sortProjects(byProject);
   lastByProjectBranch = sortProjectBranch(byProjectBranch);
   lastByModel = sortModels(byModel);
-  renderSessionsTable(lastFilteredSessions.slice(0, 20));
+  const tableSessions = _tableSessions();
+  renderSessionsTable(tableSessions.slice(0, 20));
   renderModelCostTable(byModel);
   renderProjectCostTable(lastByProject.slice(0, 20));
   renderProjectBranchCostTable(lastByProjectBranch.slice(0, 20));
 
-  const visibleSessions = lastFilteredSessions.slice(0, 20);
+  const visibleSessions = tableSessions.slice(0, 20);
   if (!visibleSessions.length) {
     selectedSessionId = null;
     document.getElementById('session-detail-card').style.display = 'none';
@@ -2226,6 +2249,25 @@ function renderPareto(filteredSessions) {  // eslint-disable-line no-unused-vars
   el.style.display = "";
   const names = ranked.map(s => `${s.project} (${s.session_id})`).join(", ");
   el.innerHTML = `<strong>Cost concentration:</strong> top 5 sessions account for <strong>${pct}%</strong> of spend in the current range. <span style="color:var(--muted)">(${names})</span>`;
+}
+
+// Scheduled-task sessions are hidden from the sessions table (and its
+// exports) by default; they still count in every total.
+let _showScheduled = false;
+try { _showScheduled = localStorage.getItem('showScheduled') === '1'; } catch (e) {}
+function _onShowScheduled(on) {  // eslint-disable-line no-unused-vars
+  _showScheduled = !!on;
+  try { localStorage.setItem('showScheduled', on ? '1' : '0'); } catch (e) {}
+  applyFilter();
+}
+function _tableSessions() {
+  const all = lastFilteredSessions || [];
+  const n = all.filter(s => s.scheduled).length;
+  const cnt = document.getElementById('sched-count');
+  if (cnt) cnt.textContent = n;
+  const cb = document.getElementById('show-scheduled');
+  if (cb) cb.checked = _showScheduled;
+  return _showScheduled ? all : all.filter(s => !s.scheduled);
 }
 
 let _searchTerm = "";
@@ -2652,7 +2694,7 @@ function downloadCSV(reportType, header, rows) {
 
 function exportSessionsCSV() {
   const header = ['Session ID', 'Session Name', 'Project', 'Last Active', 'Duration (min)', 'Model', 'Turns', 'Input', 'Output', 'Cache Read', 'Cache Creation', 'Est. Cost'];
-  const rows = lastFilteredSessions.map(s => {
+  const rows = _tableSessions().map(s => {
     const cost = calcCost(s.model, s.input, s.output, s.cache_read, s.cache_creation, s.cache_1h);
     return [s.session_id, s.session_name || '', s.project, s.last, s.duration_min, s.model, s.turns, s.input, s.output, s.cache_read, s.cache_creation, cost.toFixed(4)];
   });
@@ -2747,7 +2789,7 @@ function copyModelMD() {
 
 function copySessionsMD() {
   const headers = ['Session', 'Project', 'Last Active', 'Duration (min)', 'Model', 'Turns', 'Input', 'Output', 'Est. Cost'];
-  const rows = (lastFilteredSessions || []).map(sess => {
+  const rows = _tableSessions().map(sess => {
     const cost = calcCost(sess.model, sess.input, sess.output, sess.cache_read, sess.cache_creation, sess.cache_1h);
     return [sess.session_name || sess.session_id, sess.project, sess.last, sess.duration_min,
       sess.model, sess.turns, sess.input, sess.output, '$' + cost.toFixed(4)];
@@ -2985,6 +3027,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
         elif path == "/api/data":
+            _maybe_scan()
             data = get_dashboard_data()
             body = json.dumps(data).encode("utf-8")
             self.send_response(200)
@@ -3146,6 +3189,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
 
 def serve(host=None, port=None):
+    global AUTO_SCAN
+    AUTO_SCAN = True
     host = host or os.environ.get("HOST", "localhost")
     port = port or int(os.environ.get("PORT", "8080"))
     ThreadingHTTPServer.allow_reuse_address = True
