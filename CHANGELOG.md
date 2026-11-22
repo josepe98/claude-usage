@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.8.1 — 2026-11-22
 
 - Fix 1-hour cache writes being left out of most cost figures: the dashboard's Est. Cost card, Cost by Model table, session, project and branch costs, the Pareto card and the plan card, and `cli.py today` / `week` / `stats`. Claude Code writes mostly to the 1-hour cache, so these figures were understated by roughly 45%. The session detail view and `cli.py timeline` already counted them.
 
